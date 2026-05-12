@@ -1,0 +1,7 @@
+chainlit
+json-repair
+neo4j
+numpy
+python-dotenv
+pytest
+requests
