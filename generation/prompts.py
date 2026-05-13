@@ -25,7 +25,6 @@ Return only valid JSON with this schema:
       "snippet": "short quote or table excerpt"
     }
   ],
-  "trace": ["query_vector_match -> block_id", "block_id -RELATION-> block_id"],
   "limitations": "state missing or ambiguous evidence, or empty string"
 }
 """

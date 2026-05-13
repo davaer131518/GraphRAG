@@ -106,7 +106,7 @@ class AnswerGenerator:
                 for item in bundle.final_evidence[:5]
             ]
 
-        trace = data.get("trace") if isinstance(data.get("trace"), list) else format_trace_steps(bundle.trace)
+        trace = format_trace_steps(bundle.trace)
         return AnalystAnswer(
             answer=str(data.get("answer") or "I could not produce an answer from the available evidence."),
             confidence=confidence,  # type: ignore[arg-type]
