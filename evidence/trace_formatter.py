@@ -16,11 +16,15 @@ from evidence.evidence_bundle import (
 def format_trace_steps(steps: list[TraceStep]) -> list[str]:
     lines: list[str] = []
     for step in steps:
-        target = step.to_id or step.from_id
         score = f" (score={step.score:.3f})" if step.score is not None else ""
         relation = f" via {step.relationship}" if step.relationship else ""
         page = f", page {step.page}" if step.page is not None else ""
-        suffix = f" -> {target}{relation}{page}{score}" if target else score
+        if step.to_id:
+            suffix = f" -> {step.to_id}{relation}{page}{score}"
+        elif step.from_id:
+            suffix = f" [{step.from_id}]"
+        else:
+            suffix = score
         lines.append(f"{step.action}{suffix}: {step.description}")
     return lines
 
@@ -54,15 +58,34 @@ def format_sources_markdown(sources: list[dict[str, Any]] | list[Any]) -> str:
         page = source.get("page", "unknown")
         block_id = source.get("block_id", "unknown")
         btype = source.get("type", "unknown")
-        section = source.get("section") or "Unknown section"
+        section_title = source.get("section_title") or source.get("section") or "Unknown section"
+        section_path = source.get("section_path") or ""
         why = source.get("why_relevant") or "Selected by the retrieval pipeline."
         snippet = source.get("snippet") or ""
-        blocks.append(
-            f"**Page {page} - Block `{block_id}` - {btype}**\n\n"
-            f"Section: {section}\n\n"
-            f"Why relevant: {why}\n\n"
-            f"Snippet: \"{snippet}\""
-        )
+        mentioned_entities = source.get("mentioned_entities") or []
+
+        lines = [
+            f"**Page {page} - Block `{block_id}` - {btype}**",
+            "",
+            f"Section: {section_title}",
+        ]
+        if section_path and section_path != section_title:
+            lines.append(f"`{section_path}`")
+        if mentioned_entities:
+            top = mentioned_entities[:5]
+            entity_str = ", ".join(
+                f"{e.get('name', e.get('entity_name', '?'))} ({e.get('type', e.get('entity_type', '?'))})"
+                + (f", ×{e['count']}" if e.get("count") else "")
+                for e in top
+            )
+            lines.append(f"Mentions: {entity_str}")
+        lines += [
+            "",
+            f"Why relevant: {why}",
+            "",
+            f'Snippet: "{snippet}"',
+        ]
+        blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
 

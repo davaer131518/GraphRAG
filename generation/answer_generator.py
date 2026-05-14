@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any
 
+from config import Settings
 from evidence.evidence_bundle import AnalystAnswer, EvidenceBundle, SourceCitation
 from evidence.trace_formatter import format_trace_steps
 from generation.prompts import SYSTEM_PROMPT, build_answer_prompt
@@ -20,13 +21,15 @@ logger = logging.getLogger(__name__)
 
 
 class AnswerGenerator:
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(self, llm: LLMClient, settings: Settings | None = None) -> None:
         self.llm = llm
+        self.settings = settings
 
     def generate(self, bundle: EvidenceBundle) -> AnalystAnswer:
         if not bundle.final_evidence:
             return self._empty_answer(bundle)
-        prompt = build_answer_prompt(bundle)
+        max_chars = self.settings.prompt_evidence_max_chars if self.settings else 1000
+        prompt = build_answer_prompt(bundle, prompt_snippet_max_chars=max_chars)
         try:
             raw = self.llm.chat(SYSTEM_PROMPT, prompt, json_mode=True)
             data = self._parse_json(raw)
@@ -79,18 +82,25 @@ class AnswerGenerator:
         if confidence not in {"high", "medium", "low"}:
             confidence = "low"
 
+        # Build a lookup so we can enrich LLM-cited sources with entity/section info.
+        evidence_by_id = {item.block_id: item for item in bundle.final_evidence}
+
         sources = []
         for raw_source in data.get("sources") or []:
             if not isinstance(raw_source, dict):
                 continue
+            block_id = str(raw_source.get("block_id") or "")
+            ev = evidence_by_id.get(block_id)
             sources.append(
                 SourceCitation(
                     page=raw_source.get("page"),
-                    block_id=str(raw_source.get("block_id") or ""),
+                    block_id=block_id,
                     type=str(raw_source.get("type") or "unknown"),
-                    section=raw_source.get("section"),
+                    section_title=raw_source.get("section_title") or raw_source.get("section") or (ev.section_title if ev else None),
+                    section_path=ev.section_path if ev else None,
                     why_relevant=str(raw_source.get("why_relevant") or "Used as evidence."),
                     snippet=str(raw_source.get("snippet") or ""),
+                    mentioned_entities=(ev.mentioned_entities[:5] if ev else []),
                 )
             )
         if not sources:
@@ -99,9 +109,11 @@ class AnswerGenerator:
                     page=item.page,
                     block_id=item.block_id,
                     type=item.type,
-                    section=item.section,
+                    section_title=item.section_title,
+                    section_path=item.section_path,
                     why_relevant=item.why_relevant or "Selected by the retrieval pipeline.",
                     snippet=item.snippet,
+                    mentioned_entities=item.mentioned_entities[:5],
                 )
                 for item in bundle.final_evidence[:5]
             ]
@@ -137,7 +149,7 @@ class AnswerGenerator:
                     "page": item.page,
                     "block_id": item.block_id,
                     "type": item.type,
-                    "section": item.section,
+                    "section_title": item.section_title,
                     "why_relevant": item.why_relevant or "Selected by the retrieval pipeline.",
                     "snippet": item.snippet,
                 }

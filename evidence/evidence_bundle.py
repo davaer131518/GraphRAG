@@ -43,8 +43,10 @@ class EvidenceItem:
     page: int | None
     text: str
     snippet: str = ""
-    section: str | None = None
-    section_block_id: str | None = None
+    section_title: str | None = None      # renamed from `section`; populated from Section.title
+    section_id: str | None = None          # renamed from `section_block_id`; now holds Section.section_id
+    section_path: str | None = None        # slash-delimited ancestry from KGBuilder
+    section_level: int | None = None       # hierarchy depth
     score: float | None = None
     retrieval_method: str = "unknown"
     relationship_path: list[str] = field(default_factory=list)
@@ -52,6 +54,11 @@ class EvidenceItem:
     source_block_id: str | None = None
     why_relevant: str | None = None
     rank_features: dict[str, float] = field(default_factory=dict)
+    mentioned_entities: list[dict[str, Any]] = field(default_factory=list)
+    matched_entities: list[dict[str, Any]] = field(default_factory=list)
+    relationship_confidence: float | None = None
+    relationship_scope: str | None = None
+    relationship_methods: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -75,14 +82,19 @@ class EvidenceItem:
             type=str(row.get("type") or "unknown"),
             page=row.get("page") or row.get("page_number"),
             text=row.get("text") or "",
-            section=row.get("section"),
-            section_block_id=row.get("section_id"),
+            section_title=row.get("section_title") or row.get("section"),
+            section_id=row.get("section_id"),
+            section_path=row.get("section_path"),
+            section_level=row.get("section_level"),
             score=row.get("score"),
             retrieval_method=retrieval_method,
             relationship_path=relationship_path or [retrieval_method],
             source_relationship=source_relationship,
             source_block_id=source_block_id,
             why_relevant=why_relevant,
+            relationship_confidence=row.get("confidence"),
+            relationship_scope=row.get("scope"),
+            relationship_methods=list(row.get("methods") or []),
             metadata=metadata or {},
         )
 
@@ -110,9 +122,11 @@ class SourceCitation:
     page: int | None
     block_id: str
     type: str
-    section: str | None
+    section_title: str | None          # renamed from `section`
+    section_path: str | None
     why_relevant: str
     snippet: str
+    mentioned_entities: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -6,7 +6,7 @@ class FakeLLM:
     def __init__(self, response: str) -> None:
         self.response = response
 
-    def chat(self, system: str, user: str, *, max_tokens: int | None = None) -> str:
+    def chat(self, system: str, user: str, **kwargs) -> str:
         return self.response
 
 
@@ -15,7 +15,8 @@ def bundle() -> EvidenceBundle:
         block_id="p0017_b0000",
         type="paragraph",
         page=17,
-        section="Risk Factors",
+        section_title="Risk Factors",
+        section_path="Part I / Risk Factors",
         text="The App Store is subject to litigation and regulatory requirements.",
         retrieval_method="vector",
     )
@@ -31,7 +32,9 @@ def test_answer_generator_parses_valid_json() -> None:
     answer = generator.generate(bundle())
     assert answer.answer == "A"
     assert answer.confidence == "high"
+    # When LLM returns no sources, falls back to evidence items
     assert answer.sources[0].block_id == "p0017_b0000"
+    assert answer.sources[0].section_title == "Risk Factors"
 
 
 def test_answer_generator_falls_back_on_malformed_json() -> None:

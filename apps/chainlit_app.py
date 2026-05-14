@@ -22,6 +22,7 @@ from evidence.trace_formatter import (
 from generation.answer_generator import AnswerGenerator
 from llm_client import LLMClient
 from neo4j_client import Neo4jClient
+from retrievers.entity_retriever import EntityRetriever
 from retrievers.graph_expander import GraphExpander
 from retrievers.hybrid_retriever import HybridRetriever
 from retrievers.keyword_retriever import KeywordRetriever
@@ -45,9 +46,10 @@ def build_analyst() -> tuple[TraceablePDFAnalyst, Neo4jClient, ServerManager | N
     llm = LLMClient(settings)
     semantic = SemanticRetriever(neo4j, embeddings, settings)
     keyword = KeywordRetriever(neo4j, settings)
+    entity_retriever = EntityRetriever(neo4j, settings)
     graph_expander = GraphExpander(neo4j, settings)
-    retriever = HybridRetriever(semantic, keyword, graph_expander, settings)
-    answer_generator = AnswerGenerator(llm)
+    retriever = HybridRetriever(semantic, keyword, entity_retriever, graph_expander, settings)
+    answer_generator = AnswerGenerator(llm, settings)
     analyst = TraceablePDFAnalyst(retriever, answer_generator, neo4j, settings)
     return analyst, neo4j, server_manager
 
@@ -118,6 +120,9 @@ async def answer_question(analyst: TraceablePDFAnalyst, question: str) -> None:
         pass
     async with cl.Step(name="Running keyword search"):
         pass
+    if analyst.settings.enable_entity_retriever:
+        async with cl.Step(name="Searching entity mentions"):
+            pass
     async with cl.Step(name="Expanding graph context"):
         pass
     async with cl.Step(name="Building evidence bundle and generating answer"):

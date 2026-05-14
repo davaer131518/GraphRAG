@@ -34,6 +34,11 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Claude Code
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
 # Chainlit internals (auto-generated translations etc. are safe to keep,
 # but the config.toml may contain local overrides you don't want public)
 # Uncomment the line below if you want to exclude it:

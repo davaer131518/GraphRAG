@@ -14,34 +14,51 @@ When you ask a question the pipeline runs in three layers:
 
 ### Layer 1 — Seed retrieval
 
-- **Vector search**: the question is embedded with the same bge-m3 model that was used to embed the blocks, and Neo4j's native ANN vector index returns the top-K semantically similar blocks.
+Three retrievers run in parallel and their results are merged and deduplicated on `block_id`:
+
+- **Vector search**: the question is embedded with the same bge-m3 model used to embed the blocks, and Neo4j's native ANN vector index returns the top-K semantically similar blocks.
 - **Keyword search**: key phrases and terms are extracted from the question and matched against `Block.text`, preferring a full-text index if available and falling back to a `CONTAINS` query.
-- Both result sets are merged and deduplicated.
+- **Entity search**: extracted terms are matched against `:Entity` nodes using a 3-tier strategy — exact canonical name match (score 1.0), alias match (score 0.9), and partial substring match (score 0.6, min 4 chars). Each matched block carries the entity name, type, and match score for use in ranking. High-frequency generic terms (`TERM` entities above `TERM_DOC_FREQ_FILTER`) are excluded. Can be disabled with `ENABLE_ENTITY_RETRIEVER=false`.
 
 ### Layer 2 — Graph expansion
 
-The top seed blocks are expanded through the KG using relationship-specific rules:
+Each seed block is expanded through the KG using three arms:
 
-- **Paragraph / caption / list item seeds**: follow `REFERS_TO` (blocks that discuss a table), `SEMANTICALLY_SIMILAR` (related tables above a score threshold), and a local `PRECEDES` window on the same page.
-- **Table seeds**: follow `CONTEXT_BEFORE` and `CONTEXT_AFTER` (the blocks immediately surrounding the table in reading order), incoming `REFERS_TO` (paragraphs discussing it), incoming `DESCRIBES` (its caption), and `COMPARES` / `SUPPLEMENTS` / `CONTRASTS` / `ABLATES` (table-to-table relationships labelled by the LLM during graph construction).
+**Arm 1 — Relationship-typed** (dispatched by `Block.type`):
+- **Paragraph / caption / list item seeds**: follow `REFERS_TO` (blocks that discuss this block), `SEMANTICALLY_SIMILAR` with `scope='table'` (related tables above a configurable threshold), `SEMANTICALLY_SIMILAR` with `scope='global'` (any block, higher threshold — disable with `ENABLE_GLOBAL_SIMILARITY_EXPANSION=false`), and a local `PRECEDES` window on the same page.
+- **Table seeds**: follow `CONTEXT_BEFORE` / `CONTEXT_AFTER` (blocks immediately surrounding the table), incoming `REFERS_TO` / `DESCRIBES` (paragraphs and captions), and table-pair edges `COMPARES` / `SUPPLEMENTS` / `CONTRASTS` / `ABLATES` / `TABLE_RELATES_TO` (the last is an APOC fallback; its logical label is normalised in code).
 - **Heading seeds**: follow `INTRODUCES` to the blocks that belong to that section.
 
-All expansion is bounded and explicit. No variable-length traversal.
+**Arm 2 — Entity-mediated** (`ENABLE_ENTITY_EXPANSION=true`): traverses `seed -[:MENTIONS]-> Entity <-[:MENTIONS]- related` to find blocks that mention the same entities as the seed. Bounded by `ENTITY_EXPANSION_ENTITIES_PER_SEED` and `ENTITY_EXPANSION_BLOCKS_PER_ENTITY`.
+
+**Arm 3 — Section-aware** (`ENABLE_SECTION_EXPANSION=true`): returns sibling blocks in the same `:Section` ordered by reading-order proximity. Bounded by `SECTION_EXPANSION_LIMIT`. Structural blocks (tables, figures, captions) receive an additional `section_structural_bonus` in ranking.
+
+All expansion is bounded and explicit. No variable-length Cypher traversal.
 
 ### Layer 3 — Answer generation
 
-The expanded evidence is ranked by a combination of vector score, keyword match, relationship type weight, block type, and exact phrase overlap. The top-N blocks are packaged into a structured evidence bundle and sent to a local LLM (Qwen3.5-4B via llama.cpp) with a strict system prompt that requires a JSON answer citing every factual claim back to a specific page and block ID.
+The expanded evidence is ranked by a multi-signal score:
+
+- **Retrieval method bonuses**: vector (0.32), keyword (0.30), expansion (0.12)
+- **Relationship type weight**: `REFERS_TO` (0.28), `DESCRIBES` (0.24), table-pair rels (0.18–0.22), `MENTIONS_SHARED` (0.14), `SAME_SECTION` (0.10), etc.
+- **Block type weight**, **vector score**, **exact phrase overlap**
+- **Entity bonuses**: `entity_match_bonus` scaled by match score (exact 1.0 / alias 0.9 / partial 0.6); `entity_confidence_bonus` scaled by `MENTIONS.confidence`
+- **Section bonuses**: `same_section_bonus` (seed and candidate share a `:Section`), `section_path_match_bonus` (question token in section path/title), `section_structural_bonus` (table/figure/caption reached via section expansion)
+- **Graph bonuses**: `global_similarity_bonus` (capped at 0.20), `relationship_confidence_bonus` (capped at 0.10)
+
+The top-`FINAL_EVIDENCE_LIMIT` blocks are packaged into a structured evidence bundle and sent to a local LLM (Qwen3.5-4B via llama.cpp) with a strict system prompt that requires a JSON answer citing every factual claim back to a specific page and block ID.
 
 ```
 Question
-  -> embed question        (bge-m3 on EMBED_SERVER_URL)
-  -> vector search         (Neo4j block_embedding_index)
-  -> keyword search        (Neo4j full-text or CONTAINS)
-  -> merge seeds
-  -> graph expansion       (typed KG relationship rules)
+  -> embed question          (bge-m3 on EMBED_SERVER_URL)
+  -> vector search           (Neo4j block_embedding_index)
+  -> keyword search          (Neo4j full-text or CONTAINS)
+  -> entity search           (Neo4j :Entity via MENTIONS, 3-tier matching)
+  -> merge + dedupe seeds
+  -> graph expansion         (relationship-typed + entity-mediated + section-aware)
   -> rank + dedupe
   -> build evidence bundle
-  -> LLM answer            (Qwen3.5-4B on LLM_SERVER_URL)
+  -> LLM answer              (Qwen3.5-4B on LLM_SERVER_URL)
   -> render in Chainlit
 ```
 
@@ -105,6 +122,27 @@ $env:EMBED_N_CTX                   = "8192"
 $env:LLM_SERVER_PORT               = "8092"
 $env:LLM_N_CTX                     = "4096"
 $env:LLAMA_HEALTH_TIMEOUT          = "120"
+# Entity retrieval bounds
+$env:ENTITY_TOP_K                            = "8"
+$env:ENTITY_EXPANSION_ENTITIES_PER_SEED      = "4"
+$env:ENTITY_EXPANSION_BLOCKS_PER_ENTITY      = "5"
+$env:SECTION_EXPANSION_LIMIT                 = "6"
+$env:GLOBAL_SIMILARITY_THRESHOLD             = "0.65"
+$env:TERM_DOC_FREQ_FILTER                    = "0.25"
+$env:MENTIONED_ENTITIES_PER_BLOCK            = "5"
+# Ranker bonuses (each individually capped)
+$env:ENTITY_MATCH_BONUS                      = "0.18"
+$env:ENTITY_CONFIDENCE_BONUS_WEIGHT          = "0.10"
+$env:SAME_SECTION_BONUS                      = "0.08"
+$env:SECTION_PATH_MATCH_BONUS                = "0.10"
+$env:SECTION_STRUCTURAL_BONUS                = "0.05"
+$env:GLOBAL_SIMILARITY_BONUS_WEIGHT          = "0.20"
+$env:RELATIONSHIP_CONFIDENCE_BONUS_WEIGHT    = "0.10"
+# Feature flags (set to "false" to disable individual retrieval arms)
+$env:ENABLE_ENTITY_RETRIEVER         = "true"
+$env:ENABLE_ENTITY_EXPANSION         = "true"
+$env:ENABLE_SECTION_EXPANSION        = "true"
+$env:ENABLE_GLOBAL_SIMILARITY_EXPANSION = "true"
 ```
 
 `DOCUMENT_ID` scopes all queries to a single document node. Leave it unset to query across all documents in the graph.
@@ -217,9 +255,12 @@ GraphRAG/
 ├── retrievers/
 │   ├── semantic_retriever.py   Vector search seeds
 │   ├── keyword_retriever.py    Keyword/full-text search seeds + term extraction
-│   ├── graph_expander.py       Relationship-specific expansion policy
+│   ├── entity_retriever.py     Entity-based seeds via :Entity MENTIONS edges (3-tier matching)
+│   ├── graph_expander.py       Three-arm expansion: relationship-typed, entity-mediated, section-aware
 │   └── hybrid_retriever.py     Merge, dedupe, rank, and build evidence bundle
 ├── tests/
+│   ├── fakes.py                Shared FakeNeo4j with new-schema row shapes
+│   ├── test_neo4j_client_cypher.py  Cypher-shape guard (catches schema regressions)
 │   ├── test_evidence_bundle.py
 │   ├── test_retrieval.py
 │   ├── test_answer_generator.py
@@ -255,7 +296,7 @@ All tests use mocked Neo4j and LLM clients so they run without any running servi
 
 **Server lifecycle is handled by `server_manager.py`.** The `LlamaServer` class wraps a single `llama-server.exe` process; `ServerManager` coordinates the embedding/LLM pair. If `AUTO_START_SERVERS=true`, the Chainlit `on_chat_start` hook starts both servers and `on_chat_end` stops only the ones it started (servers that were already running are left untouched).
 
-**Graph expansion is bounded.** The expander only follows seeds up to `GRAPH_EXPANSION_LIMIT` and uses a fixed per-block limit on expansion rows. There is no variable-length traversal.
+**Graph expansion is bounded.** The expander walks at most `GRAPH_EXPANSION_LIMIT` seeds and applies three independently feature-flagged arms: relationship-typed (existing KG edges), entity-mediated (`MENTIONS`-bridged), and section-aware (sibling blocks in the same `:Section`). Per-arm row limits are hard-coded. There is no variable-length Cypher traversal.
 
 ---
 
@@ -265,19 +306,36 @@ All tests use mocked Neo4j and LLM clients so they run without any running servi
 (:Document {doc_id, filename, num_pages})
 (:Page {page_id, page_number})
 (:Block {block_id, type, text, page_number, reading_order, embedding})
+(:Section {section_id, title, path, level, page_start, page_end, block_count, heading_block_id})
+(:Entity {entity_id, canonical_name, normalized_name, aliases, type, confidence, doc_frequency_ratio, doc_id})
 
 (:Page)-[:PART_OF]->(:Document)
 (:Block)-[:ON_PAGE]->(:Page)
-(:Block)-[:PRECEDES]->(:Block)           reading order chain
-(:Block)-[:DESCRIBES]->(:Block)          caption -> table/figure
-(:Block)-[:INTRODUCES]->(:Block)         heading -> section content
-(:Block)-[:IN_SECTION]->(:Block)         block -> deepest parent heading
-(:Block)-[:CONTEXT_BEFORE]->(:Block)     N blocks before a table
-(:Block)-[:CONTEXT_AFTER]->(:Block)      table -> N blocks after it
-(:Block)-[:REFERS_TO {methods,mention}]->(:Block)
-(:Block)-[:SEMANTICALLY_SIMILAR {score}]->(:Block)
-(:Block)-[:COMPARES|SUPPLEMENTS|CONTRASTS|ABLATES {reason}]->(:Block)
+(:Block)-[:PRECEDES]->(:Block)                         reading order chain
+(:Block)-[:DESCRIBES]->(:Block)                        caption -> table/figure
+(:Block)-[:INTRODUCES]->(:Block)                       heading -> section content
+(:Block)-[:IN_SECTION]->(:Section)                     block -> deepest parent :Section node
+(:Block)-[:CONTEXT_BEFORE]->(:Block)                   N blocks before a table
+(:Block)-[:CONTEXT_AFTER]->(:Block)                    table -> N blocks after it
+(:Block)-[:REFERS_TO {methods: list[str], confidence, scope, mention}]->(:Block)
+(:Block)-[:SEMANTICALLY_SIMILAR {score, scope, methods}]-(:Block)  undirected; scope ∈ {"table","global"}
+(:Block)-[:COMPARES|SUPPLEMENTS|CONTRASTS|ABLATES {reason}]->(:Block {type:'table'})
+(:Block)-[:TABLE_RELATES_TO {label, reason}]->(:Block {type:'table'})  APOC fallback; label holds the logical type
+(:Block)-[:MENTIONS {count, confidence, methods, spans_flat}]->(:Entity)
+(:Document)-[:HAS_SECTION]->(:Section)
+(:Section)-[:HAS_SUBSECTION]->(:Section)
+(:Section)-[:STARTS_ON_PAGE]->(:Page)
 ```
+
+**Notes:**
+- `IN_SECTION` targets `:Section` nodes, not heading `:Block` nodes.
+- `SEMANTICALLY_SIMILAR` is stored in canonical direction (src_id < tgt_id) so queries must use undirected `-[r:SEMANTICALLY_SIMILAR]-`.
+- `TABLE_RELATES_TO` is used when APOC is not available; the logical relationship type is stored in `r.label` and normalized via `coalesce(r.label, type(r))` in queries.
+- `REFERS_TO.methods` is always a list; never a single string.
+- `:Entity` nodes with `type = 'TERM'` and high `doc_frequency_ratio` are filtered out by default (`TERM_DOC_FREQ_FILTER = 0.25`).
+- `Block.type` values: `paragraph`, `table`, `caption`, `figure`, `formula`, `list_item`, `heading`.
+- Vector index: `block_embedding_index` (1024-dim cosine on `Block.embedding`).
+- Optional full-text index: `block_text_fulltext` (created lazily when `CREATE_FULLTEXT_INDEX=true`).
 
 ---
 

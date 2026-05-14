@@ -52,7 +52,6 @@ class Settings:
     embed_max_chars: int
     request_timeout_seconds: int
     log_level: str
-    keyword_exact_boost: float
     keyword_term_boost: float
     create_fulltext_index: bool
     # llama.cpp server auto-management
@@ -65,6 +64,30 @@ class Settings:
     llm_n_ctx: int
     llama_health_timeout: int
     auto_start_servers: bool
+    # Entity retrieval bounds
+    entity_top_k: int
+    entity_expansion_entities_per_seed: int
+    entity_expansion_blocks_per_entity: int
+    section_expansion_limit: int
+    global_similarity_threshold: float
+    term_doc_freq_filter: float
+    mentioned_entities_per_block: int
+    # Ranker bonuses (each capped so no single signal dominates vector/keyword)
+    entity_match_bonus: float
+    entity_confidence_bonus_weight: float
+    same_section_bonus: float
+    section_path_match_bonus: float
+    section_structural_bonus: float
+    global_similarity_bonus_weight: float
+    relationship_confidence_bonus_weight: float
+    # Feature flags
+    enable_entity_retriever: bool
+    enable_entity_expansion: bool
+    enable_section_expansion: bool
+    enable_global_similarity_expansion: bool
+    enable_section_title_search: bool
+    # Prompt tuning
+    prompt_evidence_max_chars: int   # chars per block sent to the LLM; larger = more context, higher token cost
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -86,7 +109,6 @@ class Settings:
             embed_max_chars=_env_int("EMBED_MAX_CHARS", 6000),
             request_timeout_seconds=_env_int("REQUEST_TIMEOUT_SECONDS", 120),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
-            keyword_exact_boost=_env_float("KEYWORD_EXACT_BOOST", 0.25),
             keyword_term_boost=_env_float("KEYWORD_TERM_BOOST", 0.05),
             create_fulltext_index=_env_bool("CREATE_FULLTEXT_INDEX", False),
             # llama.cpp server auto-management
@@ -99,6 +121,29 @@ class Settings:
             llm_n_ctx=_env_int("LLM_N_CTX", 4096),
             llama_health_timeout=_env_int("LLAMA_HEALTH_TIMEOUT", 120),
             auto_start_servers=_env_bool("AUTO_START_SERVERS", False),
+            # Entity retrieval bounds
+            entity_top_k=_env_int("ENTITY_TOP_K", 8),
+            entity_expansion_entities_per_seed=_env_int("ENTITY_EXPANSION_ENTITIES_PER_SEED", 4),
+            entity_expansion_blocks_per_entity=_env_int("ENTITY_EXPANSION_BLOCKS_PER_ENTITY", 5),
+            section_expansion_limit=_env_int("SECTION_EXPANSION_LIMIT", 6),
+            global_similarity_threshold=_env_float("GLOBAL_SIMILARITY_THRESHOLD", 0.65),
+            term_doc_freq_filter=_env_float("TERM_DOC_FREQ_FILTER", 0.25),
+            mentioned_entities_per_block=_env_int("MENTIONED_ENTITIES_PER_BLOCK", 5),
+            # Ranker bonuses
+            entity_match_bonus=_env_float("ENTITY_MATCH_BONUS", 0.18),
+            entity_confidence_bonus_weight=_env_float("ENTITY_CONFIDENCE_BONUS_WEIGHT", 0.10),
+            same_section_bonus=_env_float("SAME_SECTION_BONUS", 0.08),
+            section_path_match_bonus=_env_float("SECTION_PATH_MATCH_BONUS", 0.10),
+            section_structural_bonus=_env_float("SECTION_STRUCTURAL_BONUS", 0.05),
+            global_similarity_bonus_weight=_env_float("GLOBAL_SIMILARITY_BONUS_WEIGHT", 0.20),
+            relationship_confidence_bonus_weight=_env_float("RELATIONSHIP_CONFIDENCE_BONUS_WEIGHT", 0.10),
+            # Feature flags
+            enable_entity_retriever=_env_bool("ENABLE_ENTITY_RETRIEVER", True),
+            enable_entity_expansion=_env_bool("ENABLE_ENTITY_EXPANSION", True),
+            enable_section_expansion=_env_bool("ENABLE_SECTION_EXPANSION", True),
+            enable_global_similarity_expansion=_env_bool("ENABLE_GLOBAL_SIMILARITY_EXPANSION", True),
+            enable_section_title_search=_env_bool("ENABLE_SECTION_TITLE_SEARCH", True),
+            prompt_evidence_max_chars=_env_int("PROMPT_EVIDENCE_MAX_CHARS", 1000),
         )
 
 
