@@ -6,6 +6,7 @@ import re
 from config import Settings
 from evidence.evidence_bundle import EvidenceItem, TraceStep
 from neo4j_client import Neo4jClient
+from retrievers.scope import RetrievalScope
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,17 @@ class KeywordRetriever:
         self.neo4j = neo4j
         self.settings = settings
 
-    def retrieve(self, question: str) -> tuple[list[EvidenceItem], list[TraceStep]]:
+    def retrieve(
+        self, question: str, scope: RetrievalScope | None = None
+    ) -> tuple[list[EvidenceItem], list[TraceStep]]:
+        scope = scope or RetrievalScope.whole_corpus()
         terms = self.extract_terms(question)
         use_fulltext = self.neo4j.has_index("block_text_fulltext")
         rows = self.neo4j.keyword_search_blocks(
             self._fulltext_query(terms) if use_fulltext else question,
             terms=terms,
             top_k=self.settings.keyword_top_k,
-            document_id=self.settings.document_id,
+            document_ids=scope.doc_id_list,
             use_fulltext=use_fulltext,
         )
         items = [
@@ -63,18 +67,13 @@ class KeywordRetriever:
             for row in rows
         ]
 
-        # Section-title search: finds blocks whose containing Section's title/path
-        # matches query terms.  Catches questions where the answer block contains
-        # only proper nouns (e.g. product lists) with no lexical overlap with the
-        # question but lives inside a section whose heading IS the anchor phrase
-        # (e.g. "Third Quarter of 2023").
         section_title_items: list[EvidenceItem] = []
         if self.settings.enable_section_title_search:
             seen_ids = {row["block_id"] for row in rows}
             st_rows = self.neo4j.section_title_search_blocks(
                 terms,
                 top_k=self.settings.keyword_top_k,
-                document_id=self.settings.document_id,
+                document_ids=scope.doc_id_list,
             )
             for row in st_rows:
                 if row["block_id"] not in seen_ids:
@@ -113,6 +112,41 @@ class KeywordRetriever:
         ]
         logger.info("Keyword terms: %s; section-title extras: %s", terms, len(section_title_items))
         return all_items, trace
+
+    def retrieve_tables(
+        self, question: str, scope: RetrievalScope | None = None
+    ) -> tuple[list[EvidenceItem], list[TraceStep]]:
+        """Seed table blocks directly from question terms, bypassing prose competition."""
+        scope = scope or RetrievalScope.whole_corpus()
+        terms = self.extract_terms(question)
+        use_fulltext = self.neo4j.has_index("block_text_fulltext")
+        rows = self.neo4j.table_keyword_search(
+            self._fulltext_query(terms) if use_fulltext else question,
+            terms=terms,
+            top_k=self.settings.table_top_k,
+            document_ids=scope.doc_id_list,
+            use_fulltext=use_fulltext,
+        )
+        items = [
+            EvidenceItem.from_row(
+                row,
+                retrieval_method="table_keyword",
+                relationship_path=[f"query_table_keyword_match -> {row['block_id']}"],
+                why_relevant="Table block whose row labels match question terms.",
+                metadata={"terms": terms},
+            )
+            for row in rows
+        ]
+        trace = [
+            TraceStep(
+                action="table_search",
+                description=f"Table keyword search returned {len(items)} table blocks.",
+                method="table_keyword",
+                metadata={"terms": terms, "used_fulltext": use_fulltext},
+            )
+        ]
+        logger.info("Table seed search: %s table blocks", len(items))
+        return items, trace
 
     @staticmethod
     def extract_terms(question: str) -> list[str]:

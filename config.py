@@ -41,6 +41,7 @@ class Settings:
     neo4j_database: str | None
     embed_server_url: str
     llm_server_url: str
+    # Startup sticky-scope seed (back-compat with single-doc usage; no longer used for retrieval)
     document_id: str | None
     vector_top_k: int
     keyword_top_k: int
@@ -78,16 +79,33 @@ class Settings:
     same_section_bonus: float
     section_path_match_bonus: float
     section_structural_bonus: float
+    table_in_section_bonus: float
     global_similarity_bonus_weight: float
     relationship_confidence_bonus_weight: float
-    # Feature flags
+    # Table seed search
+    enable_table_seed_search: bool
+    table_top_k: int
+    # Feature flags — same-doc arms
     enable_entity_retriever: bool
     enable_entity_expansion: bool
     enable_section_expansion: bool
     enable_global_similarity_expansion: bool
     enable_section_title_search: bool
+    # Feature flags — cross-doc arms (auto-on at >1 doc; individually disengageable for debugging)
+    enable_cross_doc_entity_expansion: bool
+    enable_cross_doc_section_expansion: bool
+    enable_cross_doc_table_expansion: bool
+    # Cross-doc arm bounds (hard per-seed/per-edge caps)
+    cross_doc_entity_entities_per_seed: int
+    cross_doc_entity_blocks_per_entity: int
+    cross_doc_similar_sections_per_seed: int
+    cross_doc_blocks_per_similar_section: int
+    cross_doc_table_limit: int
+    # Ranker cross-doc knobs
+    cross_doc_method_bonus: float
+    cross_doc_per_doc_cap: int
     # Prompt tuning
-    prompt_evidence_max_chars: int   # chars per block sent to the LLM; larger = more context, higher token cost
+    prompt_evidence_max_chars: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -135,14 +153,31 @@ class Settings:
             same_section_bonus=_env_float("SAME_SECTION_BONUS", 0.08),
             section_path_match_bonus=_env_float("SECTION_PATH_MATCH_BONUS", 0.10),
             section_structural_bonus=_env_float("SECTION_STRUCTURAL_BONUS", 0.05),
+            table_in_section_bonus=_env_float("TABLE_IN_SECTION_BONUS", 0.25),
             global_similarity_bonus_weight=_env_float("GLOBAL_SIMILARITY_BONUS_WEIGHT", 0.20),
             relationship_confidence_bonus_weight=_env_float("RELATIONSHIP_CONFIDENCE_BONUS_WEIGHT", 0.10),
-            # Feature flags
+            # Table seed search
+            enable_table_seed_search=_env_bool("ENABLE_TABLE_SEED_SEARCH", True),
+            table_top_k=_env_int("TABLE_TOP_K", 5),
+            # Feature flags — same-doc arms
             enable_entity_retriever=_env_bool("ENABLE_ENTITY_RETRIEVER", True),
             enable_entity_expansion=_env_bool("ENABLE_ENTITY_EXPANSION", True),
             enable_section_expansion=_env_bool("ENABLE_SECTION_EXPANSION", True),
             enable_global_similarity_expansion=_env_bool("ENABLE_GLOBAL_SIMILARITY_EXPANSION", True),
             enable_section_title_search=_env_bool("ENABLE_SECTION_TITLE_SEARCH", True),
+            # Feature flags — cross-doc arms
+            enable_cross_doc_entity_expansion=_env_bool("ENABLE_CROSS_DOC_ENTITY_EXPANSION", True),
+            enable_cross_doc_section_expansion=_env_bool("ENABLE_CROSS_DOC_SECTION_EXPANSION", True),
+            enable_cross_doc_table_expansion=_env_bool("ENABLE_CROSS_DOC_TABLE_EXPANSION", True),
+            # Cross-doc arm bounds
+            cross_doc_entity_entities_per_seed=_env_int("CROSS_DOC_ENTITY_ENTITIES_PER_SEED", 3),
+            cross_doc_entity_blocks_per_entity=_env_int("CROSS_DOC_ENTITY_BLOCKS_PER_ENTITY", 3),
+            cross_doc_similar_sections_per_seed=_env_int("CROSS_DOC_SIMILAR_SECTIONS_PER_SEED", 2),
+            cross_doc_blocks_per_similar_section=_env_int("CROSS_DOC_BLOCKS_PER_SIMILAR_SECTION", 4),
+            cross_doc_table_limit=_env_int("CROSS_DOC_TABLE_LIMIT", 6),
+            # Ranker cross-doc knobs
+            cross_doc_method_bonus=_env_float("CROSS_DOC_METHOD_BONUS", 0.08),
+            cross_doc_per_doc_cap=_env_int("CROSS_DOC_PER_DOC_CAP", 3),
             prompt_evidence_max_chars=_env_int("PROMPT_EVIDENCE_MAX_CHARS", 1000),
         )
 

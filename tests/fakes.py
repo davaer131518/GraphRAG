@@ -13,6 +13,28 @@ from typing import Any
 # Canonical new-schema row shapes (minimal, valid defaults)
 # ---------------------------------------------------------------------------
 
+def _document_row(
+    doc_id: str = "doc_001",
+    filename: str = "document.pdf",
+    num_pages: int = 50,
+    corpus_id: str = "default",
+    doc_family: str | None = None,
+    logical_doc_key: str | None = None,
+    version_id: str | None = None,
+    published_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "doc_id": doc_id,
+        "filename": filename,
+        "num_pages": num_pages,
+        "corpus_id": corpus_id,
+        "doc_family": doc_family,
+        "logical_doc_key": logical_doc_key,
+        "version_id": version_id,
+        "published_at": published_at,
+    }
+
+
 def _block_row(
     block_id: str = "p0001_b0000",
     btype: str = "paragraph",
@@ -23,6 +45,8 @@ def _block_row(
     section_title: str | None = "Risk Factors",
     section_path: str | None = "Part I / Risk Factors",
     section_level: int | None = 2,
+    doc_id: str | None = "doc_001",
+    filename: str | None = "document.pdf",
     **extra: Any,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
@@ -35,6 +59,8 @@ def _block_row(
         "section_title": section_title,
         "section_path": section_path,
         "section_level": section_level,
+        "doc_id": doc_id,
+        "filename": filename,
     }
     if score is not None:
         row["score"] = score
@@ -78,6 +104,8 @@ def _section_map_row(
     block_count: int = 3,
     blocks: list[dict] | None = None,
     child_section_ids: list[str] | None = None,
+    doc_id: str = "doc_001",
+    filename: str = "document.pdf",
 ) -> dict[str, Any]:
     if blocks is None:
         blocks = [
@@ -99,6 +127,8 @@ def _section_map_row(
             },
         ]
     return {
+        "doc_id": doc_id,
+        "filename": filename,
         "section_id": section_id,
         "title": title,
         "path": path,
@@ -186,6 +216,120 @@ def _section_expand_row(
     return row
 
 
+def _cross_doc_entity_expand_row(
+    block_id: str = "p0101_b0000",
+    canonical_id: str = "default_ORG_apple",
+    canonical_name: str = "Apple Inc.",
+    canonical_type: str = "ORG",
+    source_entity_name: str = "Apple",
+    related_entity_name: str = "Apple Inc.",
+    mention_count: int = 3,
+    mention_confidence: float = 0.85,
+    doc_id: str = "doc_002",
+    filename: str = "document2.pdf",
+    **extra: Any,
+) -> dict[str, Any]:
+    row = _block_row(block_id=block_id, doc_id=doc_id, filename=filename, **extra)
+    row.update({
+        "canonical_id": canonical_id,
+        "canonical_name": canonical_name,
+        "canonical_type": canonical_type,
+        "source_entity_name": source_entity_name,
+        "related_entity_name": related_entity_name,
+        "mention_count": mention_count,
+        "mention_confidence": mention_confidence,
+    })
+    return row
+
+
+def _similar_section_expand_row(
+    block_id: str = "p0102_b0000",
+    source_section_title: str = "Risk Factors",
+    score: float = 0.82,
+    methods: list[str] | None = None,
+    doc_id: str = "doc_002",
+    filename: str = "document2.pdf",
+    **extra: Any,
+) -> dict[str, Any]:
+    row = _block_row(
+        block_id=block_id,
+        score=score,
+        doc_id=doc_id,
+        filename=filename,
+        section_title="Risk Factors",
+        **extra,
+    )
+    row.update({
+        "source_section_title": source_section_title,
+        "methods": methods or ["embedding", "entity_overlap"],
+    })
+    return row
+
+
+def _cross_doc_table_row(
+    source_block_id: str = "p0029_b0007",
+    target_block_id: str = "p0201_b0003",
+    relationship: str = "SCHEMA_MATCH",
+    score: float = 0.88,
+    schema_score: float = 0.88,
+    metric_score: float | None = None,
+    doc_id: str = "doc_002",
+    filename: str = "document2.pdf",
+) -> dict[str, Any]:
+    return {
+        "source_block_id": source_block_id,
+        "source_page": 29,
+        "source_text": "Source table text.",
+        "source_section": "Revenue",
+        "target_block_id": target_block_id,
+        "block_id": target_block_id,
+        "type": "table",
+        "page": 15,
+        "target_page": 15,
+        "text": "Target table text.",
+        "target_text": "Target table text.",
+        "section_id": "sec_201",
+        "section_title": "Revenue",
+        "target_section": "Revenue",
+        "section_path": "Part II / Revenue",
+        "section_level": 2,
+        "doc_id": doc_id,
+        "filename": filename,
+        "relationship": relationship,
+        "score": score,
+        "schema_score": schema_score,
+        "metric_score": metric_score,
+        "methods": ["header_jaccard", "embedding"],
+    }
+
+
+def _related_document_row(
+    doc_id: str = "doc_002",
+    filename: str = "document2.pdf",
+    score: float = 0.85,
+    evidence_summary: str = "metric=3, section=5, schema=2, hv_entities=4, total_entities=12",
+) -> dict[str, Any]:
+    return {
+        "doc_id": doc_id,
+        "filename": filename,
+        "doc_family": None,
+        "logical_doc_key": None,
+        "version_id": None,
+        "published_at": None,
+        "score": score,
+        "evidence_summary": evidence_summary,
+        "shared_canonical_entity_count": 12,
+        "high_value_shared_canonical_entity_count": 4,
+        "similar_section_count": 5,
+        "schema_match_count": 2,
+        "reports_same_metric_count": 3,
+        "same_logical_doc_key": False,
+        "same_doc_family": False,
+        "title_similarity": 0.3,
+        "methods": ["canonical_entities", "section_links"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # FakeNeo4j
 # ---------------------------------------------------------------------------
@@ -199,8 +343,11 @@ class FakeNeo4j:
 
     # Called by analyst / retrievers ------------------------------------------
 
+    def list_documents(self) -> list[dict[str, Any]]:
+        return [_document_row()]
+
     def vector_search_blocks(
-        self, embedding: list[float], *, top_k: int, document_id: str | None
+        self, embedding: list[float], *, top_k: int, document_ids: list[str] | None
     ) -> list[dict[str, Any]]:
         return [_block_row(block_id="p0001_b0000", score=0.85)]
 
@@ -210,17 +357,28 @@ class FakeNeo4j:
         *,
         terms: list[str],
         top_k: int,
-        document_id: str | None,
+        document_ids: list[str] | None,
         use_fulltext: bool,
     ) -> list[dict[str, Any]]:
         return [_block_row(block_id="p0001_b0001", score=1.0)]
+
+    def table_keyword_search(
+        self,
+        query_text: str,
+        *,
+        terms: list[str],
+        top_k: int,
+        document_ids: list[str] | None,
+        use_fulltext: bool,
+    ) -> list[dict[str, Any]]:
+        return []
 
     def section_title_search_blocks(
         self,
         terms: list[str],
         *,
         top_k: int,
-        document_id: str | None,
+        document_ids: list[str] | None,
         term_min_len: int = 4,
     ) -> list[dict[str, Any]]:
         return [_block_row(
@@ -237,7 +395,7 @@ class FakeNeo4j:
         *,
         top_k: int,
         term_doc_freq_filter: float,
-        document_id: str | None,
+        document_ids: list[str] | None,
     ) -> list[dict[str, Any]]:
         return [_entity_block_row(block_id="p0001_b0002")]
 
@@ -259,7 +417,7 @@ class FakeNeo4j:
         entities_per_seed: int,
         blocks_per_entity: int,
         term_doc_freq_filter: float,
-        document_id: str | None,
+        document_ids: list[str] | None,
     ) -> list[dict[str, Any]]:
         return [_entity_expand_row(block_id="p0003_b0000")]
 
@@ -268,9 +426,49 @@ class FakeNeo4j:
         block_id: str,
         *,
         limit: int,
-        document_id: str | None,
+        document_ids: list[str] | None,
     ) -> list[dict[str, Any]]:
         return [_section_expand_row(block_id="p0001_b0005", section_distance=1)]
+
+    def expand_block_via_canonical_entities(
+        self,
+        block_id: str,
+        *,
+        entities_per_seed: int,
+        blocks_per_entity: int,
+        term_doc_freq_filter: float,
+        document_ids: list[str] | None,
+        corpus_id: str | None,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def expand_block_via_similar_sections(
+        self,
+        block_id: str,
+        *,
+        similar_sections_per_seed: int,
+        blocks_per_section: int,
+        document_ids: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def get_cross_doc_table_matches(
+        self,
+        table_id: str,
+        *,
+        document_ids: list[str] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def list_related_documents(
+        self,
+        doc_id: str,
+        *,
+        document_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        return []
 
     def get_table_relationships(
         self, table_id: str, relation: str | None = None
@@ -279,7 +477,7 @@ class FakeNeo4j:
 
     def get_document_map_hierarchical(
         self,
-        document_id: str | None,
+        document_ids: list[str] | None,
         *,
         term_doc_freq_filter: float = 0.25,
     ) -> list[dict[str, Any]]:

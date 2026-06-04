@@ -43,10 +43,12 @@ class EvidenceItem:
     page: int | None
     text: str
     snippet: str = ""
-    section_title: str | None = None      # renamed from `section`; populated from Section.title
-    section_id: str | None = None          # renamed from `section_block_id`; now holds Section.section_id
+    section_title: str | None = None      # populated from Section.title
+    section_id: str | None = None          # holds Section.section_id
     section_path: str | None = None        # slash-delimited ancestry from KGBuilder
     section_level: int | None = None       # hierarchy depth
+    doc_id: str | None = None              # source Document.doc_id
+    doc_label: str | None = None           # human-friendly label (filename or doc_id)
     score: float | None = None
     retrieval_method: str = "unknown"
     relationship_path: list[str] = field(default_factory=list)
@@ -64,6 +66,9 @@ class EvidenceItem:
     def __post_init__(self) -> None:
         if not self.snippet:
             self.snippet = make_snippet(self.text)
+        # Default doc_label to filename or doc_id
+        if not self.doc_label and self.doc_id:
+            self.doc_label = self.doc_id
 
     @classmethod
     def from_row(
@@ -77,6 +82,8 @@ class EvidenceItem:
         why_relevant: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> "EvidenceItem":
+        doc_id = row.get("doc_id")
+        doc_label = row.get("filename") or row.get("doc_label") or doc_id
         return cls(
             block_id=str(row.get("block_id") or row.get("id")),
             type=str(row.get("type") or "unknown"),
@@ -86,6 +93,8 @@ class EvidenceItem:
             section_id=row.get("section_id"),
             section_path=row.get("section_path"),
             section_level=row.get("section_level"),
+            doc_id=doc_id,
+            doc_label=doc_label,
             score=row.get("score"),
             retrieval_method=retrieval_method,
             relationship_path=relationship_path or [retrieval_method],
@@ -105,13 +114,21 @@ class EvidenceItem:
 @dataclass
 class EvidenceBundle:
     question: str
-    document_id: str | None
+    document_ids: list[str] | None = None  # None = whole corpus; list = resolved scope
+    corpus_id: str | None = None
+    scope_rationale: str | None = None
+    scope_source: str | None = None         # "sticky" | "query" | "corpus"
+    answering_scope_note: str | None = None # post-retrieval: which doc(s) actually answered
     seed_blocks: list[EvidenceItem] = field(default_factory=list)
     expanded_blocks: list[EvidenceItem] = field(default_factory=list)
     final_evidence: list[EvidenceItem] = field(default_factory=list)
     trace: list[TraceStep] = field(default_factory=list)
     ranking_debug: list[dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def answering_doc_ids(self) -> list[str]:
+        """The distinct doc_ids that appear in the final evidence."""
+        return sorted({item.doc_id for item in self.final_evidence if item.doc_id})
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -122,10 +139,12 @@ class SourceCitation:
     page: int | None
     block_id: str
     type: str
-    section_title: str | None          # renamed from `section`
+    section_title: str | None
     section_path: str | None
     why_relevant: str
     snippet: str
+    doc_id: str | None = None
+    doc_label: str | None = None
     mentioned_entities: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,6 +179,9 @@ class TableRelationship:
     target_snippet: str
     relation: str
     reason: str | None = None
+    is_cross_doc: bool = False
+    target_doc_id: str | None = None
+    target_doc_label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

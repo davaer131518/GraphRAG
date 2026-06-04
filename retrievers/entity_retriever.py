@@ -7,6 +7,7 @@ from config import Settings
 from evidence.evidence_bundle import EvidenceItem, TraceStep
 from neo4j_client import Neo4jClient
 from retrievers.keyword_retriever import KeywordRetriever
+from retrievers.scope import RetrievalScope
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +19,17 @@ class EntityRetriever:
         self.neo4j = neo4j
         self.settings = settings
 
-    def retrieve(self, question: str) -> tuple[list[EvidenceItem], list[TraceStep]]:
+    def retrieve(
+        self, question: str, scope: RetrievalScope | None = None
+    ) -> tuple[list[EvidenceItem], list[TraceStep]]:
+        scope = scope or RetrievalScope.whole_corpus()
         terms = KeywordRetriever.extract_terms(question)
         terms_lower = list({t.lower() for t in terms})
         rows = self.neo4j.entity_search_blocks(
             terms_lower,
             top_k=self.settings.entity_top_k,
             term_doc_freq_filter=self.settings.term_doc_freq_filter,
-            document_id=self.settings.document_id,
+            document_ids=scope.doc_id_list,
         )
         items = [self._row_to_item(row) for row in rows]
 

@@ -23,7 +23,6 @@ def _source() -> str:
 
 def test_in_section_targets_section_node() -> None:
     src = _source()
-    # Must contain at least one IN_SECTION targeting :Section
     assert re.search(r"IN_SECTION\]->\(s?:Section\)", src), (
         "Expected IN_SECTION to target :Section nodes"
     )
@@ -31,7 +30,6 @@ def test_in_section_targets_section_node() -> None:
 
 def test_no_in_section_to_block() -> None:
     src = _source()
-    # Must NOT contain IN_SECTION targeting a :Block
     assert not re.search(r"IN_SECTION\]->\([a-z]*:Block", src), (
         "Found IN_SECTION targeting :Block — should target :Section"
     )
@@ -39,7 +37,6 @@ def test_no_in_section_to_block() -> None:
 
 def test_no_in_section_to_heading_block() -> None:
     src = _source()
-    # Must NOT reference IN_SECTION on a heading alias like h:Block
     assert not re.search(r"IN_SECTION\]->\([a-z]*:Block\s*\{[^}]*type.*heading", src), (
         "Found IN_SECTION targeting a heading :Block — should target :Section"
     )
@@ -51,7 +48,6 @@ def test_no_in_section_to_heading_block() -> None:
 
 def test_semantically_similar_is_undirected() -> None:
     src = _source()
-    # All occurrences of the match pattern should be undirected (no -> after the rel)
     directed = re.findall(r"-\[r:SEMANTICALLY_SIMILAR\]->", src)
     assert not directed, (
         f"Found {len(directed)} directed SEMANTICALLY_SIMILAR match(es) — must be undirected"
@@ -136,4 +132,141 @@ def test_no_old_get_document_map_rows() -> None:
     src = _source()
     assert "get_document_map_rows" not in src, (
         "Old get_document_map_rows still present — should be replaced by get_document_map_hierarchical"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-doc: document_ids IN filter (old equality form must be gone)
+# ---------------------------------------------------------------------------
+
+def test_document_ids_in_filter_present() -> None:
+    src = _source()
+    assert "$document_ids IS NULL OR d.doc_id IN $document_ids" in src, (
+        "Expected $document_ids IS NULL OR d.doc_id IN $document_ids filter"
+    )
+    assert "$document_ids IS NULL OR e.doc_id IN $document_ids" in src, (
+        "Expected $document_ids IS NULL OR e.doc_id IN $document_ids filter"
+    )
+    assert "$document_ids IS NULL OR s.doc_id IN $document_ids" in src, (
+        "Expected $document_ids IS NULL OR s.doc_id IN $document_ids filter"
+    )
+
+
+def test_old_equality_document_id_filter_gone() -> None:
+    src = _source()
+    assert "= $document_id" not in src, (
+        "Old '= $document_id' equality filter still present — must be replaced with IN $document_ids"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-doc: doc_id and filename projected from seed queries
+# ---------------------------------------------------------------------------
+
+def test_doc_id_and_filename_projected() -> None:
+    src = _source()
+    assert "d.doc_id AS doc_id" in src, (
+        "Expected d.doc_id AS doc_id in seed/expansion RETURN projections"
+    )
+    assert "d.filename AS filename" in src, (
+        "Expected d.filename AS filename in seed/expansion RETURN projections"
+    )
+
+
+# ---------------------------------------------------------------------------
+# list_documents: discovery query projections
+# ---------------------------------------------------------------------------
+
+def test_list_documents_projects_required_fields() -> None:
+    src = _source()
+    assert "def list_documents" in src, "Expected list_documents method"
+    assert "d.corpus_id" in src, "Expected d.corpus_id in list_documents"
+    assert "d.doc_family" in src, "Expected d.doc_family in list_documents"
+    assert "d.logical_doc_key" in src, "Expected d.logical_doc_key in list_documents"
+    assert "d.version_id" in src, "Expected d.version_id in list_documents"
+    assert "d.published_at" in src, "Expected d.published_at in list_documents"
+
+
+# ---------------------------------------------------------------------------
+# Cross-doc edges: must be matched undirected (no closing arrow)
+# ---------------------------------------------------------------------------
+
+def test_similar_section_is_undirected() -> None:
+    src = _source()
+    # Must NOT have ]-> immediately after :SIMILAR_SECTION
+    directed = re.findall(r"-\[r:SIMILAR_SECTION\]->", src)
+    assert not directed, (
+        f"Found {len(directed)} directed SIMILAR_SECTION match(es) — must be undirected"
+    )
+
+
+def test_schema_match_reports_same_metric_undirected() -> None:
+    src = _source()
+    # The cross-doc table query uses alternation — must not be directed
+    directed = re.findall(r"-\[r:SCHEMA_MATCH\|REPORTS_SAME_METRIC\]->", src)
+    assert not directed, (
+        f"Found {len(directed)} directed SCHEMA_MATCH|REPORTS_SAME_METRIC match(es) — must be undirected"
+    )
+
+
+def test_related_document_undirected() -> None:
+    src = _source()
+    directed = re.findall(r"-\[r:RELATED_DOCUMENT\]->", src)
+    assert not directed, (
+        f"Found {len(directed)} directed RELATED_DOCUMENT match(es) — must be undirected"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-doc edges: decision filter present
+# ---------------------------------------------------------------------------
+
+def test_cross_doc_edges_filter_accepted() -> None:
+    src = _source()
+    assert "coalesce(r.decision, 'accepted') = 'accepted'" in src, (
+        "Expected coalesce(r.decision,'accepted')='accepted' filter on cross-doc edges"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CanonicalEntity: correct property names (display_name, NOT canonical_name as field)
+# ---------------------------------------------------------------------------
+
+def test_canonical_entity_uses_display_name() -> None:
+    src = _source()
+    assert "ce.display_name" in src, (
+        "Expected ce.display_name (not ce.canonical_name) — display_name is the actual KGBuilder property"
+    )
+    assert "ce.canonical_id" in src, (
+        "Expected ce.canonical_id in cross-doc entity expansion"
+    )
+
+
+# ---------------------------------------------------------------------------
+# RESOLVES_TO must be directed; e2.doc_id <> e.doc_id must be present
+# ---------------------------------------------------------------------------
+
+def test_resolves_to_is_directed() -> None:
+    src = _source()
+    # Must have at least one directed RESOLVES_TO (Entity->CanonicalEntity)
+    assert re.search(r"-\[:RESOLVES_TO\]->", src), (
+        "Expected directed -[:RESOLVES_TO]-> in cross-doc entity expansion"
+    )
+
+
+def test_cross_doc_entity_filters_same_doc() -> None:
+    src = _source()
+    assert "e2.doc_id <> e.doc_id" in src, (
+        "Expected e2.doc_id <> e.doc_id cross-doc guard in expand_block_via_canonical_entities"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-doc table query uses type(r) for relationship name
+# ---------------------------------------------------------------------------
+
+def test_cross_doc_table_uses_type_r() -> None:
+    src = _source()
+    assert "type(r) AS relationship" in src, (
+        "Expected type(r) AS relationship in get_cross_doc_table_matches"
     )

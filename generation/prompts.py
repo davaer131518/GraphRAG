@@ -10,6 +10,10 @@ If the evidence is incomplete, say so in limitations and lower confidence.
 
 IMPORTANT: Read EVERY evidence block before writing the answer. When an evidence entry has "all_block_ids", that entry represents multiple PDF bullet items merged into one snippet — include ALL items from that snippet in your answer and cite each block_id in "all_block_ids" as a separate source.
 
+IMPORTANT: Evidence blocks with "type": "table" contain real financial or structured data formatted with | (pipe) delimiters. The values between | separators are actual numbers — parse and use them. Never say numerical data is missing if a table block's snippet contains numbers separated by |.
+
+IMPORTANT: When a table snippet shows multiple $ values in a row without explicit column labels, apply the column order established by the nearest paragraph or context evidence entry for that table. For example, if a paragraph states the table covers "2025, 2024 and 2023" and the table row shows "| $ | 416,161 | $ | 391,035 | $ | 383,285", then 2025=$416,161, 2024=$391,035, 2023=$383,285. Do not say a year's value is missing when the value is present and the column order is known from context.
+
 When an evidence entry's "why_relevant" starts with "Contains question terms:", those exact keywords from the question appear in that block's snippet — read it carefully before concluding the terms are absent.
 
 Every source must cite page, block_id, type, section_title, why_relevant, and snippet.
@@ -31,6 +35,44 @@ Return only valid JSON with this schema:
 }
 """
 
+COMPARATIVE_SYSTEM_PROMPT = """You are a traceable PDF analyst comparing multiple documents.
+Answer only from the provided evidence. Do not use outside knowledge.
+The evidence spans MULTIPLE documents; each evidence entry includes a "document" field with the source document label.
+
+IMPORTANT: Evidence blocks with "type": "table" contain real financial or structured data formatted with | (pipe) delimiters. The values between | separators are actual numbers — parse and use them. Never say numerical data is missing if a table block's snippet contains numbers separated by |.
+
+IMPORTANT: When a table snippet shows multiple $ values in a row without explicit column labels, apply the column order established by the nearest paragraph or context evidence entry for that table. For example, if a paragraph states the table covers "2025, 2024 and 2023" and the table row shows "| $ | 416,161 | $ | 391,035 | $ | 383,285", then 2025=$416,161, 2024=$391,035, 2023=$383,285. Do not say a year's value is missing when the value is present and the column order is known from context.
+
+For every claim, state which document it comes from. When documents agree, say so explicitly.
+When documents differ, compare and contrast them clearly and attribute each side to its document.
+If a document is silent on a point, note that rather than assuming it agrees.
+
+Every source must cite page, block_id, type, section_title, document, why_relevant, and snippet.
+Return only valid JSON with this schema:
+{
+  "answer": "human-readable answer with per-document attribution",
+  "confidence": "high | medium | low",
+  "sources": [
+    {
+      "page": 1,
+      "block_id": "p0001_b0000",
+      "type": "paragraph",
+      "section_title": "Section heading",
+      "document": "2024_10-K.pdf",
+      "why_relevant": "why this source supports the answer",
+      "snippet": "short quote or table excerpt"
+    }
+  ],
+  "limitations": "state missing or ambiguous evidence, or empty string"
+}
+"""
+
+
+def select_system_prompt(bundle: EvidenceBundle) -> str:
+    """Return the comparative prompt when final evidence spans >1 distinct document."""
+    distinct_docs = {item.doc_id for item in bundle.final_evidence if item.doc_id}
+    return COMPARATIVE_SYSTEM_PROMPT if len(distinct_docs) > 1 else SYSTEM_PROMPT
+
 
 _LIST_BLOCK_MAX_CHARS = 350  # blocks shorter than this are candidates for list merging
 _STOPWORDS = frozenset(
@@ -51,16 +93,13 @@ def _question_tokens(question: str) -> list[str]:
 
 
 def build_answer_prompt(bundle: EvidenceBundle, *, prompt_snippet_max_chars: int = 1000) -> str:
-    # Use a larger snippet than the UI source card (item.snippet is capped at 360 chars for display).
-    # Key phrases often appear mid-block past the 360-char cap, so the LLM needs more context
-    # than the display snippet provides.
     items = bundle.final_evidence
     q_tokens = _question_tokens(bundle.question)
 
+    # Multi-doc flag: add "document" key to every evidence entry when spans >1 doc
+    multi_doc = len({it.doc_id for it in items if it.doc_id}) > 1
 
     # Detect list groups: 2+ short blocks from the same section anywhere in the evidence set.
-    # PDF bullet lists are split one item per Block; gather all of them so the LLM sees the
-    # complete list in a single entry, regardless of how the blocks ranked individually.
     section_indices: dict[str, list[int]] = {}
     for i, item in enumerate(items):
         if item.section_id and len(item.text or "") < _LIST_BLOCK_MAX_CHARS:
@@ -95,6 +134,8 @@ def build_answer_prompt(bundle: EvidenceBundle, *, prompt_snippet_max_chars: int
             }
             if item.section_path and item.section_path != item.section_title:
                 entry["section_path"] = item.section_path
+            if multi_doc and item.doc_label:
+                entry["document"] = item.doc_label
             hits = [t for t in q_tokens if t in merged_snippet.lower()]
             if hits:
                 terms_str = ", ".join(sorted(set(hits)))
@@ -114,6 +155,8 @@ def build_answer_prompt(bundle: EvidenceBundle, *, prompt_snippet_max_chars: int
             }
             if item.section_path and item.section_path != item.section_title:
                 entry["section_path"] = item.section_path
+            if multi_doc and item.doc_label:
+                entry["document"] = item.doc_label
             # Check full text (not truncated snippet) so terms beyond max_chars are detected
             text_lower = (item.text or "").lower()
             hits = [t for t in q_tokens if t in text_lower]
@@ -124,7 +167,6 @@ def build_answer_prompt(bundle: EvidenceBundle, *, prompt_snippet_max_chars: int
                     + (item.why_relevant or "Selected by retrieval pipeline.")
                 )
             if item.mentioned_entities:
-                # Cap at 3 entities in the prompt to keep it bounded
                 top = item.mentioned_entities[:3]
                 entry["entities"] = "; ".join(
                     f"{e.get('name', e.get('entity_name', '?'))} ({e.get('type', e.get('entity_type', '?'))})"

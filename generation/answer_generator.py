@@ -8,7 +8,7 @@ from typing import Any
 from config import Settings
 from evidence.evidence_bundle import AnalystAnswer, EvidenceBundle, SourceCitation
 from evidence.trace_formatter import format_trace_steps
-from generation.prompts import SYSTEM_PROMPT, build_answer_prompt
+from generation.prompts import build_answer_prompt, select_system_prompt
 from llm_client import LLMClient, LLMClientError
 
 try:
@@ -30,8 +30,9 @@ class AnswerGenerator:
             return self._empty_answer(bundle)
         max_chars = self.settings.prompt_evidence_max_chars if self.settings else 1000
         prompt = build_answer_prompt(bundle, prompt_snippet_max_chars=max_chars)
+        system = select_system_prompt(bundle)
         try:
-            raw = self.llm.chat(SYSTEM_PROMPT, prompt, json_mode=True)
+            raw = self.llm.chat(system, prompt, json_mode=True)
             data = self._parse_json(raw)
             logger.info("Answer JSON parsed successfully")
         except (LLMClientError, ValueError, json.JSONDecodeError) as exc:
@@ -82,7 +83,6 @@ class AnswerGenerator:
         if confidence not in {"high", "medium", "low"}:
             confidence = "low"
 
-        # Build a lookup so we can enrich LLM-cited sources with entity/section info.
         evidence_by_id = {item.block_id: item for item in bundle.final_evidence}
 
         sources = []
@@ -91,6 +91,9 @@ class AnswerGenerator:
                 continue
             block_id = str(raw_source.get("block_id") or "")
             ev = evidence_by_id.get(block_id)
+            # Prefer doc_label from LLM-returned "document" field, fall back to EvidenceItem
+            doc_label = raw_source.get("document") or (ev.doc_label if ev else None)
+            doc_id = ev.doc_id if ev else None
             sources.append(
                 SourceCitation(
                     page=raw_source.get("page"),
@@ -100,6 +103,8 @@ class AnswerGenerator:
                     section_path=ev.section_path if ev else None,
                     why_relevant=str(raw_source.get("why_relevant") or "Used as evidence."),
                     snippet=str(raw_source.get("snippet") or ""),
+                    doc_id=doc_id,
+                    doc_label=doc_label,
                     mentioned_entities=(ev.mentioned_entities[:5] if ev else []),
                 )
             )
@@ -113,6 +118,8 @@ class AnswerGenerator:
                     section_path=item.section_path,
                     why_relevant=item.why_relevant or "Selected by the retrieval pipeline.",
                     snippet=item.snippet,
+                    doc_id=item.doc_id,
+                    doc_label=item.doc_label,
                     mentioned_entities=item.mentioned_entities[:5],
                 )
                 for item in bundle.final_evidence[:5]
@@ -152,6 +159,7 @@ class AnswerGenerator:
                     "section_title": item.section_title,
                     "why_relevant": item.why_relevant or "Selected by the retrieval pipeline.",
                     "snippet": item.snippet,
+                    "document": item.doc_label,
                 }
                 for item in bundle.final_evidence[:5]
             ],

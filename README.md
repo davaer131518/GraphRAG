@@ -14,39 +14,48 @@ When you ask a question the pipeline runs in three layers:
 
 ### Layer 1 — Seed retrieval
 
-Three retrievers run in parallel and their results are merged and deduplicated on `block_id`:
+Four retrievers run and their results are merged and deduplicated on `block_id`:
 
 - **Vector search**: the question is embedded with the same bge-m3 model used to embed the blocks, and Neo4j's native ANN vector index returns the top-K semantically similar blocks.
 - **Keyword search**: key phrases and terms are extracted from the question and matched against `Block.text`, preferring a full-text index if available and falling back to a `CONTAINS` query.
 - **Entity search**: extracted terms are matched against `:Entity` nodes using a 3-tier strategy — exact canonical name match (score 1.0), alias match (score 0.9), and partial substring match (score 0.6, min 4 chars). Each matched block carries the entity name, type, and match score for use in ranking. High-frequency generic terms (`TERM` entities above `TERM_DOC_FREQ_FILTER`) are excluded. Can be disabled with `ENABLE_ENTITY_RETRIEVER=false`.
+- **Table keyword search**: searches only `type='table'` blocks for question terms, separate from the prose search. This ensures structured data tables (income statements, segment breakdowns, etc.) are seeded directly and not crowded out by risk-factor or discussion paragraphs that mention the same terms in passing. Uses the full-text index when available, falls back to `CONTAINS`. Gated by `ENABLE_TABLE_SEED_SEARCH=true`.
 
 ### Layer 2 — Graph expansion
 
-Each seed block is expanded through the KG using three arms:
+Each seed block is expanded through the KG using up to six arms. The first three are same-document; the last three are cross-document and only fire when the scope spans more than one document.
 
 **Arm 1 — Relationship-typed** (dispatched by `Block.type`):
-- **Paragraph / caption / list item seeds**: follow `REFERS_TO` (blocks that discuss this block), `SEMANTICALLY_SIMILAR` with `scope='table'` (related tables above a configurable threshold), `SEMANTICALLY_SIMILAR` with `scope='global'` (any block, higher threshold — disable with `ENABLE_GLOBAL_SIMILARITY_EXPANSION=false`), and a local `PRECEDES` window on the same page.
-- **Table seeds**: follow `CONTEXT_BEFORE` / `CONTEXT_AFTER` (blocks immediately surrounding the table), incoming `REFERS_TO` / `DESCRIBES` (paragraphs and captions), and table-pair edges `COMPARES` / `SUPPLEMENTS` / `CONTRASTS` / `ABLATES` / `TABLE_RELATES_TO` (the last is an APOC fallback; its logical label is normalised in code).
-- **Heading seeds**: follow `INTRODUCES` to the blocks that belong to that section.
+- **Paragraph / caption / list item seeds**: follow `REFERS_TO`, `SEMANTICALLY_SIMILAR` (`scope='table'` and `scope='global'`), and a local `PRECEDES` window.
+- **Table seeds**: follow `CONTEXT_BEFORE` / `CONTEXT_AFTER`, incoming `REFERS_TO` / `DESCRIBES`, and table-pair edges `COMPARES` / `SUPPLEMENTS` / `CONTRASTS` / `ABLATES` / `TABLE_RELATES_TO`.
+- **Heading seeds**: follow `INTRODUCES` to the blocks introduced by that heading.
 
-**Arm 2 — Entity-mediated** (`ENABLE_ENTITY_EXPANSION=true`): traverses `seed -[:MENTIONS]-> Entity <-[:MENTIONS]- related` to find blocks that mention the same entities as the seed. Bounded by `ENTITY_EXPANSION_ENTITIES_PER_SEED` and `ENTITY_EXPANSION_BLOCKS_PER_ENTITY`.
+**Arm 2 — Entity-mediated** (`ENABLE_ENTITY_EXPANSION=true`): `seed -[:MENTIONS]-> Entity <-[:MENTIONS]- related`. Bounded by `ENTITY_EXPANSION_ENTITIES_PER_SEED` × `ENTITY_EXPANSION_BLOCKS_PER_ENTITY`.
 
-**Arm 3 — Section-aware** (`ENABLE_SECTION_EXPANSION=true`): returns sibling blocks in the same `:Section` ordered by reading-order proximity. Bounded by `SECTION_EXPANSION_LIMIT`. Structural blocks (tables, figures, captions) receive an additional `section_structural_bonus` in ranking.
+**Arm 3 — Section-aware** (`ENABLE_SECTION_EXPANSION=true`): sibling blocks in the same `:Section`, ordered by reading-order proximity. Bounded by `SECTION_EXPANSION_LIMIT`.
 
-All expansion is bounded and explicit. No variable-length Cypher traversal.
+**Arm 4 — Cross-doc canonical entity** (`ENABLE_CROSS_DOC_ENTITY_EXPANSION=true`): `seed -[:MENTIONS]-> Entity -[:RESOLVES_TO]-> CanonicalEntity <-[:RESOLVES_TO]- Entity2 <-[:MENTIONS]- relatedBlock` — bridges to blocks in other documents that discuss the same real-world entity. Bounded by `CROSS_DOC_ENTITY_ENTITIES_PER_SEED` × `CROSS_DOC_ENTITY_BLOCKS_PER_ENTITY`. Only fires when >1 document is in scope.
+
+**Arm 5 — Cross-doc section** (`ENABLE_CROSS_DOC_SECTION_EXPANSION=true`): follows accepted `SIMILAR_SECTION` edges (undirected) to the analogous section in another document and returns its blocks. Bounded by `CROSS_DOC_SIMILAR_SECTIONS_PER_SEED` × `CROSS_DOC_BLOCKS_PER_SIMILAR_SECTION`.
+
+**Arm 6 — Cross-doc table** (`ENABLE_CROSS_DOC_TABLE_EXPANSION=true`, table seeds only): follows accepted `SCHEMA_MATCH` / `REPORTS_SAME_METRIC` edges (undirected) to matching tables in other documents. Bounded by `CROSS_DOC_TABLE_LIMIT`.
+
+All expansion is bounded and explicit. No variable-length Cypher traversal anywhere.
 
 ### Layer 3 — Answer generation
 
 The expanded evidence is ranked by a multi-signal score:
 
-- **Retrieval method bonuses**: vector (0.32), keyword (0.30), expansion (0.12)
-- **Relationship type weight**: `REFERS_TO` (0.28), `DESCRIBES` (0.24), table-pair rels (0.18–0.22), `MENTIONS_SHARED` (0.14), `SAME_SECTION` (0.10), etc.
+- **Retrieval method bonuses**: vector (0.32), keyword / table_keyword (0.30), expansion (0.12), cross-doc arms (0.08)
+- **Relationship type weights**: `REFERS_TO` (0.28), `DESCRIBES` (0.24), table-pair rels (0.18–0.22), `REPORTS_SAME_METRIC` (0.20), `MENTIONS_SHARED` (0.14), `SCHEMA_MATCH` (0.16), `SIMILAR_SECTION` (0.12), `MENTIONS_SHARED_CANONICAL` (0.12), `SAME_SECTION` (0.10), etc. Cross-doc weights are below their same-doc analogues so cross-doc evidence augments rather than dominates.
+- **Per-document diversity cap**: a secondary document (not the highest-ranked item's doc) can occupy at most `CROSS_DOC_PER_DOC_CAP` (default 3) final slots, preventing one related document from flooding the answer. No-op at single-document scope.
 - **Block type weight**, **vector score**, **exact phrase overlap**
-- **Entity bonuses**: `entity_match_bonus` scaled by match score (exact 1.0 / alias 0.9 / partial 0.6); `entity_confidence_bonus` scaled by `MENTIONS.confidence`
-- **Section bonuses**: `same_section_bonus` (seed and candidate share a `:Section`), `section_path_match_bonus` (question token in section path/title), `section_structural_bonus` (table/figure/caption reached via section expansion)
+- **Entity bonuses**: `entity_match_bonus` scaled by match score; `entity_confidence_bonus` scaled by `MENTIONS.confidence`
+- **Section bonuses**: `same_section_bonus`, `section_path_match_bonus`, `section_structural_bonus`
+- **Table-in-section bonus** (`TABLE_IN_SECTION_BONUS`, default 0.25): table blocks in the same section as a seed get a substantial boost, ensuring financial/data tables are included alongside the paragraphs that introduce them.
 - **Graph bonuses**: `global_similarity_bonus` (capped at 0.20), `relationship_confidence_bonus` (capped at 0.10)
 
-The top-`FINAL_EVIDENCE_LIMIT` blocks are packaged into a structured evidence bundle and sent to a local LLM (Qwen3.5-4B via llama.cpp) with a strict system prompt that requires a JSON answer citing every factual claim back to a specific page and block ID.
+When the final evidence spans more than one document, the LLM is given a **comparative system prompt** that instructs it to attribute each claim to its source document and explicitly compare/contrast across documents. Single-document answers use the original system prompt unchanged.
 
 ```
 Question
@@ -54,11 +63,12 @@ Question
   -> vector search           (Neo4j block_embedding_index)
   -> keyword search          (Neo4j full-text or CONTAINS)
   -> entity search           (Neo4j :Entity via MENTIONS, 3-tier matching)
+  -> table keyword search    (Neo4j full-text or CONTAINS, type='table' only)
   -> merge + dedupe seeds
   -> graph expansion         (relationship-typed + entity-mediated + section-aware)
   -> rank + dedupe
   -> build evidence bundle
-  -> LLM answer              (Qwen3.5-4B on LLM_SERVER_URL)
+  -> LLM answer              (Qwen3.5-9B on LLM_SERVER_URL)
   -> render in Chainlit
 ```
 
@@ -71,7 +81,7 @@ Question
 | Neo4j 5.11+ with the KG already loaded | Required |
 | `block_embedding_index` vector index in Neo4j | Required |
 | llama.cpp embedding server running bge-m3 | Required for every question |
-| llama.cpp LLM server running Qwen3.5-4B (or compatible) | Required for every question |
+| llama.cpp LLM server running Qwen3.5-9B (or compatible) | Required for every question |
 
 The KG is built separately by a graph-construction notebook (not included here) run against a `document.json` parser output. Once the graph is in Neo4j, that notebook and `document.json` are not needed to run the Chainlit app.
 
@@ -102,25 +112,26 @@ Optional:
 $env:DOCUMENT_ID                   = "<source_sha256 from document.json>"
 $env:VECTOR_TOP_K                  = "8"
 $env:KEYWORD_TOP_K                 = "8"
-$env:GRAPH_EXPANSION_LIMIT         = "5"
-$env:FINAL_EVIDENCE_LIMIT          = "10"
+$env:TABLE_TOP_K                   = "5"
+$env:GRAPH_EXPANSION_LIMIT         = "20"
+$env:FINAL_EVIDENCE_LIMIT          = "20"
 $env:SEMANTIC_SIMILARITY_THRESHOLD = "0.50"
 $env:LOG_LEVEL                     = "INFO"
 $env:CREATE_FULLTEXT_INDEX         = "false"
 # LLM generation
 $env:LLM_MAX_TOKENS                = "1024"
 $env:LLM_TEMPERATURE               = "0.0"
+$env:PROMPT_EVIDENCE_MAX_CHARS     = "1000"
 # Embedding and request tuning
 $env:EMBED_MAX_CHARS               = "6000"
 $env:REQUEST_TIMEOUT_SECONDS       = "120"
 # Keyword ranking boosts
-$env:KEYWORD_EXACT_BOOST           = "0.25"
 $env:KEYWORD_TERM_BOOST            = "0.05"
 # llama.cpp server ports and context sizes (used with AUTO_START_SERVERS)
 $env:EMBED_SERVER_PORT             = "8091"
 $env:EMBED_N_CTX                   = "8192"
 $env:LLM_SERVER_PORT               = "8092"
-$env:LLM_N_CTX                     = "4096"
+$env:LLM_N_CTX                     = "32768"
 $env:LLAMA_HEALTH_TIMEOUT          = "120"
 # Entity retrieval bounds
 $env:ENTITY_TOP_K                            = "8"
@@ -136,9 +147,11 @@ $env:ENTITY_CONFIDENCE_BONUS_WEIGHT          = "0.10"
 $env:SAME_SECTION_BONUS                      = "0.08"
 $env:SECTION_PATH_MATCH_BONUS                = "0.10"
 $env:SECTION_STRUCTURAL_BONUS                = "0.05"
+$env:TABLE_IN_SECTION_BONUS                  = "0.25"
 $env:GLOBAL_SIMILARITY_BONUS_WEIGHT          = "0.20"
 $env:RELATIONSHIP_CONFIDENCE_BONUS_WEIGHT    = "0.10"
 # Feature flags (set to "false" to disable individual retrieval arms)
+$env:ENABLE_TABLE_SEED_SEARCH        = "true"
 $env:ENABLE_ENTITY_RETRIEVER         = "true"
 $env:ENABLE_ENTITY_EXPANSION         = "true"
 $env:ENABLE_SECTION_EXPANSION        = "true"
@@ -161,9 +174,9 @@ LLAMA_SERVER_EXE=C:\llama-cpp\llama-server.exe
 EMBED_MODEL_PATH=C:\llama-cpp\models\bge-m3-Q8_0.gguf
 EMBED_SERVER_PORT=8091
 EMBED_N_CTX=8192
-LLM_MODEL_PATH=C:\llama-cpp\models\Qwen3.5-4B-Q8_0.gguf
+LLM_MODEL_PATH=C:\llama-cpp\models\Qwen3.5-9B-Q8_0.gguf
 LLM_SERVER_PORT=8092
-LLM_N_CTX=4096
+LLM_N_CTX=32768
 LLAMA_HEALTH_TIMEOUT=120
 ```
 
@@ -177,8 +190,8 @@ C:\llama-cpp\llama-server.exe -m C:\llama-cpp\models\bge-m3-Q8_0.gguf `
   --port 8091 --host 127.0.0.1 -ngl -1 --embedding --pooling mean -c 8192
 
 # LLM server
-C:\llama-cpp\llama-server.exe -m C:\llama-cpp\models\Qwen3.5-4B-Q8_0.gguf `
-  --port 8092 --host 127.0.0.1 -ngl -1 -c 4096
+C:\llama-cpp\llama-server.exe -m C:\llama-cpp\models\Qwen3.5-9B-Q8_0.gguf `
+  --port 8092 --host 127.0.0.1 -ngl -1 -c 32768
 ```
 
 ### 4. Verify the knowledge graph exists (Neo4j Browser)
@@ -229,14 +242,28 @@ Which blocks explain share repurchase activity?
 What does the Risk Factors section say about cybersecurity?
 ```
 
+### Document scope
+
+The analyst automatically scopes each question to the relevant document(s) — you don't need to do anything for the common case. The scope is visible above each answer as `> Scope: …`.
+
+Explicit scope commands:
+
+| Command | What it does |
+|---|---|
+| `/docs` | List all documents in the corpus (filename, doc_id, pages, family/version). |
+| `/use <doc_id>` | Pin the session to a single document. |
+| `/scope <doc_id>[,<doc_id>…]` | Pin the session to a set of documents (for comparisons). |
+| `/scope all` | Release the pin; return to query-driven automatic scoping. |
+| `/related [doc_id]` | Show RELATED_DOCUMENT neighbors with their evidence summary and a comparison tip. |
+
 ### Commands
 
 | Command | What it does |
 |---|---|
-| `/table <block_id>` | Show all related tables through `COMPARES`, `SUPPLEMENTS`, `CONTRASTS`, and `ABLATES`. |
-| `/table <block_id> <RELATION>` | Filter to one relationship type, e.g. `/table p0033_b0002 SUPPLEMENTS`. |
-| `/map` | Generate a structured Markdown document map from section headings, key blocks, tables, and relationship summaries. |
-| `/debug last` | Show the full evidence bundle, per-block ranking scores, raw answer JSON, and trace from the last question. |
+| `/table <block_id>` | Show same-doc table relationships (`COMPARES`, `SUPPLEMENTS`, `CONTRASTS`, `ABLATES`). When multi-doc scope is active, cross-document `SCHEMA_MATCH` / `REPORTS_SAME_METRIC` links are also shown. |
+| `/table <block_id> <RELATION>` | Filter to one same-doc relationship type. |
+| `/map` | Generate a structured Markdown document map. Shows one section per in-scope document with a per-doc header when multiple documents are in scope. |
+| `/debug last` | Show the full evidence bundle (including `scope_rationale`, per-item `doc_id`, cross-doc hops in `relationship_path`), per-block ranking scores, raw answer JSON, and trace. |
 
 ---
 
@@ -250,16 +277,18 @@ GraphRAG/
 │   ├── evidence_bundle.py      Typed data models: EvidenceItem, EvidenceBundle, AnalystAnswer, etc.
 │   └── trace_formatter.py      Text and Markdown renderers for answers, sources, traces, debug output
 ├── generation/
-│   ├── prompts.py              System and user prompt templates
+│   ├── prompts.py              System and user prompt templates (single-doc + comparative)
 │   └── answer_generator.py     JSON answer parsing, validation, and fallback handling
 ├── retrievers/
+│   ├── scope.py                RetrievalScope frozen dataclass — per-turn document scoping
+│   ├── scope_resolver.py       Deterministic scope resolver (filename, doc key, year, family cues)
 │   ├── semantic_retriever.py   Vector search seeds
-│   ├── keyword_retriever.py    Keyword/full-text search seeds + term extraction
+│   ├── keyword_retriever.py    Keyword/full-text search seeds + table keyword search + term extraction
 │   ├── entity_retriever.py     Entity-based seeds via :Entity MENTIONS edges (3-tier matching)
-│   ├── graph_expander.py       Three-arm expansion: relationship-typed, entity-mediated, section-aware
+│   ├── graph_expander.py       Six-arm expansion: 3 same-doc + 3 cross-doc
 │   └── hybrid_retriever.py     Merge, dedupe, rank, and build evidence bundle
 ├── tests/
-│   ├── fakes.py                Shared FakeNeo4j with new-schema row shapes
+│   ├── fakes.py                Shared FakeNeo4j with full schema row shapes
 │   ├── test_neo4j_client_cypher.py  Cypher-shape guard (catches schema regressions)
 │   ├── test_evidence_bundle.py
 │   ├── test_retrieval.py
@@ -294,56 +323,85 @@ All tests use mocked Neo4j and LLM clients so they run without any running servi
 
 **The same analyst works without Chainlit.** The `TraceablePDFAnalyst` class in `analyst.py` can be imported directly in scripts or notebooks. The `HybridRetriever` can also be used independently.
 
-**Server lifecycle is handled by `server_manager.py`.** The `LlamaServer` class wraps a single `llama-server.exe` process; `ServerManager` coordinates the embedding/LLM pair. If `AUTO_START_SERVERS=true`, the Chainlit `on_chat_start` hook starts both servers and `on_chat_end` stops only the ones it started (servers that were already running are left untouched).
+**Server lifecycle is handled by `server_manager.py`.** The `LlamaServer` class wraps a single `llama-server.exe` process; `ServerManager` coordinates the embedding/LLM pair. If `AUTO_START_SERVERS=true`, the Chainlit `on_chat_start` hook starts both servers and `on_chat_end` stops only the ones it started (servers that were already running are left untouched). `LLM_N_CTX` must match what the server was launched with — a change requires a full server restart.
 
-**Graph expansion is bounded.** The expander walks at most `GRAPH_EXPANSION_LIMIT` seeds and applies three independently feature-flagged arms: relationship-typed (existing KG edges), entity-mediated (`MENTIONS`-bridged), and section-aware (sibling blocks in the same `:Section`). Per-arm row limits are hard-coded. There is no variable-length Cypher traversal.
+**Graph expansion is bounded.** The expander walks at most `GRAPH_EXPANSION_LIMIT` seeds and applies six independently feature-flagged arms. The first three are same-document (relationship-typed, entity-mediated, section-aware); the last three are cross-document and are inert at corpus size 1. Per-arm row limits are hard-coded. There is no variable-length Cypher traversal.
+
+**Table retrieval uses two complementary mechanisms.** The table keyword search seeds table blocks directly from question terms (bypassing prose competition). The `table_in_section_bonus` promotes table blocks that land in the same section as any prose seed (catching intro-paragraph → table pairs). Together these ensure financial and structured data tables surface reliably for numeric/data questions.
 
 ---
 
-## Graph schema (built by the KG notebook)
+## Graph schema (built by KnowledgeGraphBuilder)
+
+### Per-document nodes and edges
 
 ```
-(:Document {doc_id, filename, num_pages})
+(:Document {doc_id, filename, num_pages, corpus_id, logical_doc_key, doc_family, version_id, published_at, language, source_uri, ingested_at})
 (:Page {page_id, page_number})
 (:Block {block_id, type, text, page_number, reading_order, embedding})
-(:Section {section_id, title, path, level, page_start, page_end, block_count, heading_block_id})
+(:Section {section_id, title, path, level, page_start, page_end, block_count, heading_block_id, doc_id})
 (:Entity {entity_id, canonical_name, normalized_name, aliases, type, confidence, doc_frequency_ratio, doc_id})
 
 (:Page)-[:PART_OF]->(:Document)
 (:Block)-[:ON_PAGE]->(:Page)
-(:Block)-[:PRECEDES]->(:Block)                         reading order chain
-(:Block)-[:DESCRIBES]->(:Block)                        caption -> table/figure
-(:Block)-[:INTRODUCES]->(:Block)                       heading -> section content
-(:Block)-[:IN_SECTION]->(:Section)                     block -> deepest parent :Section node
-(:Block)-[:CONTEXT_BEFORE]->(:Block)                   N blocks before a table
-(:Block)-[:CONTEXT_AFTER]->(:Block)                    table -> N blocks after it
+(:Block)-[:PRECEDES]->(:Block)                          reading order chain
+(:Block)-[:DESCRIBES]->(:Block)                         caption -> table/figure
+(:Block)-[:INTRODUCES]->(:Block)                        heading -> section content
+(:Block)-[:IN_SECTION]->(:Section)                      block -> deepest parent :Section node (NOT a heading Block)
+(:Block)-[:CONTEXT_BEFORE|CONTEXT_AFTER]->(:Block)
 (:Block)-[:REFERS_TO {methods: list[str], confidence, scope, mention}]->(:Block)
-(:Block)-[:SEMANTICALLY_SIMILAR {score, scope, methods}]-(:Block)  undirected; scope ∈ {"table","global"}
+(:Block)-[:SEMANTICALLY_SIMILAR {score, scope, methods}]-(:Block)   undirected; scope ∈ {"table","global"}
 (:Block)-[:COMPARES|SUPPLEMENTS|CONTRASTS|ABLATES {reason}]->(:Block {type:'table'})
-(:Block)-[:TABLE_RELATES_TO {label, reason}]->(:Block {type:'table'})  APOC fallback; label holds the logical type
+(:Block)-[:TABLE_RELATES_TO {label, reason}]->(:Block {type:'table'})   APOC fallback; label = logical type
 (:Block)-[:MENTIONS {count, confidence, methods, spans_flat}]->(:Entity)
 (:Document)-[:HAS_SECTION]->(:Section)
 (:Section)-[:HAS_SUBSECTION]->(:Section)
 (:Section)-[:STARTS_ON_PAGE]->(:Page)
 ```
 
-**Notes:**
-- `IN_SECTION` targets `:Section` nodes, not heading `:Block` nodes.
-- `SEMANTICALLY_SIMILAR` is stored in canonical direction (src_id < tgt_id) so queries must use undirected `-[r:SEMANTICALLY_SIMILAR]-`.
-- `TABLE_RELATES_TO` is used when APOC is not available; the logical relationship type is stored in `r.label` and normalized via `coalesce(r.label, type(r))` in queries.
-- `REFERS_TO.methods` is always a list; never a single string.
-- `:Entity` nodes with `type = 'TERM'` and high `doc_frequency_ratio` are filtered out by default (`TERM_DOC_FREQ_FILTER = 0.25`).
-- `Block.type` values: `paragraph`, `table`, `caption`, `figure`, `formula`, `list_item`, `heading`.
+### Cross-document corpus layer
+
+All cross-doc edges are **canonically ordered** (`min(id) → max(id)`) — always query them **undirected (no arrow)**. Only `decision='accepted'` edges are written. `methods` is always `list[str]`.
+
+```
+(:CanonicalEntity {canonical_id, corpus_id, type, display_name, normalized_name, aliases, cluster_size})
+
+(:Entity)-[:RESOLVES_TO {score, methods, decision, run_id, source_doc_id}]->(:CanonicalEntity)
+   (directed: Entity -> CanonicalEntity; constrain to one corpus_id)
+
+(:Section)-[:SIMILAR_SECTION {score, methods, decision, run_id, source_doc_id, target_doc_id, ...}]-(:Section)
+   (undirected; cross-document; filter decision='accepted')
+
+(:Block{table})-[:SCHEMA_MATCH {score, schema_score, metric_score, methods, decision, ...}]-(:Block{table})
+   (undirected; cross-document; filter decision='accepted')
+
+(:Block{table})-[:REPORTS_SAME_METRIC {score, schema_score, metric_score, methods, decision, ...}]-(:Block{table})
+   (undirected; only exists alongside a SCHEMA_MATCH for the same pair)
+
+(:Document)-[:RELATED_DOCUMENT {score, methods, decision, similar_section_count, schema_match_count,
+                                  reports_same_metric_count, shared_canonical_entity_count,
+                                  high_value_shared_canonical_entity_count, evidence_summary, ...}]-(:Document)
+   (undirected; conservative precomputed aggregate)
+```
+
+**Critical schema notes:**
+- `CanonicalEntity` uses `display_name` (not `canonical_name`) and `cluster_size` (not `doc_count`).
+- `IN_SECTION` targets `:Section` nodes, **not** heading `:Block` nodes.
+- `SEMANTICALLY_SIMILAR` is stored canonically (src_id < tgt_id) — always query undirected.
+- `REFERS_TO.methods` is always a list — never a single string.
+- `TABLE_RELATES_TO` appears when APOC is absent; use `coalesce(r.label, type(r))` to normalise.
+- `:Entity` nodes with `type='TERM'` and high `doc_frequency_ratio` are filtered by `TERM_DOC_FREQ_FILTER`.
 - Vector index: `block_embedding_index` (1024-dim cosine on `Block.embedding`).
 - Optional full-text index: `block_text_fulltext` (created lazily when `CREATE_FULLTEXT_INDEX=true`).
 
 ---
 
-## Future: multi-document support
+## Multi-document support
 
-The architecture is designed for this. All retrieval queries already accept an optional `DOCUMENT_ID` to scope queries to a single document. Adding cross-document comparison will require:
+The analyst supports multi-document corpora natively. Scope is determined automatically on each turn:
 
-- Multiple `Document` nodes in Neo4j (each PDF gets its own node).
-- Cross-document relationship edges such as `SIMILAR_SECTION`, `REPORTS_SAME_METRIC`, and `CHANGED_FROM`.
-- A document selector in the Chainlit session.
-- Comparative prompts that cite sources from each document separately.
+1. **Sticky session scope** (highest priority): set by `/use <doc_id>` or `/scope <ids>`, seeded from `DOCUMENT_ID` env var at startup.
+2. **Query-driven scope**: a deterministic resolver maps explicit document/version references in the question (filename, `logical_doc_key`, year, family) to `doc_id`s. Ambiguous references fall back to the whole corpus rather than guessing.
+3. **Whole-corpus default**: when no reference is found, retrieval covers all documents in the corpus and relevance ranking surfaces the answer.
+
+Cross-doc retrieval arms (Arms 4/5/6) activate automatically when more than one document is in scope and are inert at corpus size 1.

@@ -53,14 +53,31 @@ def _settings(**overrides) -> Settings:
         same_section_bonus=0.08,
         section_path_match_bonus=0.10,
         section_structural_bonus=0.05,
+        table_in_section_bonus=0.25,
         global_similarity_bonus_weight=0.20,
         relationship_confidence_bonus_weight=0.10,
-        # Feature flags
+        # Table seed search
+        enable_table_seed_search=True,
+        table_top_k=5,
+        # Feature flags — same-doc arms
         enable_entity_retriever=True,
         enable_entity_expansion=True,
         enable_section_expansion=True,
         enable_global_similarity_expansion=True,
         enable_section_title_search=True,
+        # Feature flags — cross-doc arms
+        enable_cross_doc_entity_expansion=False,
+        enable_cross_doc_section_expansion=False,
+        enable_cross_doc_table_expansion=False,
+        # Cross-doc arm bounds
+        cross_doc_entity_entities_per_seed=3,
+        cross_doc_entity_blocks_per_entity=3,
+        cross_doc_similar_sections_per_seed=2,
+        cross_doc_blocks_per_similar_section=4,
+        cross_doc_table_limit=6,
+        # Ranker cross-doc knobs
+        cross_doc_method_bonus=0.08,
+        cross_doc_per_doc_cap=3,
         prompt_evidence_max_chars=1000,
     )
     base.update(overrides)
@@ -216,7 +233,7 @@ def test_entity_retriever_returns_blocks_via_mentions() -> None:
 
 def test_entity_retriever_partial_match_lower_score() -> None:
     class PartialFakeNeo4j(FakeNeo4j):
-        def entity_search_blocks(self, terms_lower, *, top_k, term_doc_freq_filter, document_id):
+        def entity_search_blocks(self, terms_lower, *, top_k, term_doc_freq_filter, document_ids):
             return [_entity_block_row(
                 block_id="p0005_b0001",
                 entity_match_type="partial",
@@ -235,7 +252,7 @@ def test_entity_retriever_filters_high_freq_terms() -> None:
     captured: dict = {}
 
     class CaptureFakeNeo4j(FakeNeo4j):
-        def entity_search_blocks(self, terms_lower, *, top_k, term_doc_freq_filter, document_id):
+        def entity_search_blocks(self, terms_lower, *, top_k, term_doc_freq_filter, document_ids):
             captured["term_doc_freq_filter"] = term_doc_freq_filter
             return []
 
@@ -250,11 +267,13 @@ def test_entity_retriever_disabled_by_flag() -> None:
     settings = _settings(enable_entity_retriever=False)
 
     class FakeSemanticRetriever:
-        def retrieve(self, question):
+        def retrieve(self, question, scope=None):
             return [_item("sem1", "vector", 0.8)], []
 
     class FakeKeywordRetriever:
-        def retrieve(self, question):
+        def retrieve(self, question, scope=None):
+            return [], []
+        def retrieve_tables(self, question, scope=None):
             return [], []
 
     retriever = HybridRetriever(
@@ -303,7 +322,7 @@ def test_section_expansion_emits_sibling_blocks() -> None:
 
 def test_section_expansion_structural_boost_in_metadata() -> None:
     class StructuralFakeNeo4j(FakeNeo4j):
-        def expand_block_via_section(self, block_id, *, limit, document_id):
+        def expand_block_via_section(self, block_id, *, limit, document_ids):
             return [_section_expand_row(block_id="p0001_b0010", structural_boost=1, btype="table")]
 
     settings = _settings()
@@ -344,10 +363,10 @@ def test_section_title_search_dedupes_against_text_search() -> None:
     SHARED_ID = "p0010_b0001"
 
     class OverlapFakeNeo4j(FakeNeo4j):
-        def keyword_search_blocks(self, query_text, *, terms, top_k, document_id, use_fulltext):
+        def keyword_search_blocks(self, query_text, *, terms, top_k, document_ids, use_fulltext):
             return [_block_row(block_id=SHARED_ID, score=2.0)]
 
-        def section_title_search_blocks(self, terms, *, top_k, document_id, term_min_len=4):
+        def section_title_search_blocks(self, terms, *, top_k, document_ids, term_min_len=4):
             return [_block_row(block_id=SHARED_ID, score=3.0,
                                section_title="Third Quarter of 2023")]
 
@@ -378,7 +397,7 @@ def test_section_title_search_disabled_by_flag() -> None:
     captured: dict = {}
 
     class CaptureFakeNeo4j(FakeNeo4j):
-        def section_title_search_blocks(self, terms, *, top_k, document_id, term_min_len=4):
+        def section_title_search_blocks(self, terms, *, top_k, document_ids, term_min_len=4):
             captured["called"] = True
             return []
 

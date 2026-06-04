@@ -20,7 +20,7 @@ def test_evidence_bundle_serializes_required_fields() -> None:
     )
     bundle = EvidenceBundle(
         question="What are the risks?",
-        document_id="doc",
+        document_ids=["doc"],
         seed_blocks=[item],
         final_evidence=[item],
         trace=[TraceStep(action="vector_search", description="matched", to_id=item.block_id)],

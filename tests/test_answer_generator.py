@@ -22,7 +22,7 @@ def bundle() -> EvidenceBundle:
     )
     return EvidenceBundle(
         question="What does Apple say about App Store risks?",
-        document_id=None,
+        document_ids=None,
         final_evidence=[item],
     )
 
