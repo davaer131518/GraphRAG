@@ -106,6 +106,9 @@ class Settings:
     cross_doc_per_doc_cap: int
     # Prompt tuning
     prompt_evidence_max_chars: int
+    # Document-level pre-retrieval
+    enable_document_pre_retrieval: bool
+    document_pre_retrieval_top_n: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -179,6 +182,8 @@ class Settings:
             cross_doc_method_bonus=_env_float("CROSS_DOC_METHOD_BONUS", 0.08),
             cross_doc_per_doc_cap=_env_int("CROSS_DOC_PER_DOC_CAP", 3),
             prompt_evidence_max_chars=_env_int("PROMPT_EVIDENCE_MAX_CHARS", 1000),
+            enable_document_pre_retrieval=_env_bool("ENABLE_DOCUMENT_PRE_RETRIEVAL", True),
+            document_pre_retrieval_top_n=_env_int("DOCUMENT_PRE_RETRIEVAL_TOP_N", 5),
         )
 
 

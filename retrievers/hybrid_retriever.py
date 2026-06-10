@@ -97,8 +97,49 @@ class HybridRetriever:
         self.graph_expander = graph_expander
         self.settings = settings
 
+    def _narrow_scope_by_document(
+        self, question: str, scope: RetrievalScope
+    ) -> tuple[RetrievalScope, list[TraceStep]]:
+        """Embed the question and narrow scope to the top-N most relevant documents.
+
+        Returns the original scope unchanged if the document_embedding_index does
+        not exist yet (graphs built before this feature) — graceful degradation.
+        """
+        embedding = self.semantic.embeddings.embed_query(question)
+        rows = self.semantic.neo4j.get_top_documents(
+            embedding,
+            top_n=self.settings.document_pre_retrieval_top_n,
+            corpus_id=scope.corpus_id,
+        )
+        if not rows or len(rows) < self.settings.document_pre_retrieval_top_n:
+            return scope, []
+        doc_ids = [row["doc_id"] for row in rows]
+        filenames = [row.get("filename") or did for row, did in zip(rows, doc_ids)]
+        rationale = (
+            f"Document pre-retrieval narrowed scope to {len(doc_ids)} document(s): "
+            + ", ".join(filenames) + "."
+        )
+        narrowed = (
+            RetrievalScope.single(doc_ids[0], corpus_id=scope.corpus_id,
+                                  rationale=rationale, source="doc_preretrieval")
+            if len(doc_ids) == 1
+            else RetrievalScope.multi(doc_ids, corpus_id=scope.corpus_id,
+                                      rationale=rationale, source="doc_preretrieval")
+        )
+        trace = [TraceStep(
+            action="document_pre_retrieval",
+            description=rationale,
+            method="doc_preretrieval",
+            metadata={"top_n": self.settings.document_pre_retrieval_top_n, "doc_ids": doc_ids},
+        )]
+        return narrowed, trace
+
     def retrieve(self, question: str, scope: RetrievalScope | None = None) -> EvidenceBundle:
         scope = scope or RetrievalScope.whole_corpus()
+
+        doc_pre_trace: list[TraceStep] = []
+        if self.settings.enable_document_pre_retrieval and not scope.is_scoped:
+            scope, doc_pre_trace = self._narrow_scope_by_document(question, scope)
 
         semantic_items, semantic_trace = self.semantic.retrieve(question, scope)
         keyword_items, keyword_trace = self.keyword.retrieve(question, scope)
@@ -125,6 +166,7 @@ class HybridRetriever:
                 method=scope.source,
                 metadata=scope.to_dict(),
             ),
+            *doc_pre_trace,
             *semantic_trace,
             *keyword_trace,
             *entity_trace,

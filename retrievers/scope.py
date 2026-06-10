@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ScopeSource = Literal["sticky", "query", "corpus"]
+ScopeSource = Literal["sticky", "query", "corpus", "doc_preretrieval"]
 
 
 @dataclass(frozen=True)
