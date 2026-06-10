@@ -102,10 +102,11 @@ class AnswerGenerator:
                     section_title=raw_source.get("section_title") or raw_source.get("section") or (ev.section_title if ev else None),
                     section_path=ev.section_path if ev else None,
                     why_relevant=str(raw_source.get("why_relevant") or "Used as evidence."),
-                    snippet=str(raw_source.get("snippet") or ""),
+                    snippet=str((ev.snippet if ev else None) or raw_source.get("snippet") or ""),
                     doc_id=doc_id,
                     doc_label=doc_label,
                     mentioned_entities=(ev.mentioned_entities[:5] if ev else []),
+                    table_html=(ev.table_html if ev else None),
                 )
             )
         if not sources:

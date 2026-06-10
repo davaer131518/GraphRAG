@@ -79,6 +79,8 @@ def _settings(**overrides) -> Settings:
         cross_doc_method_bonus=0.08,
         cross_doc_per_doc_cap=3,
         prompt_evidence_max_chars=1000,
+        enable_document_pre_retrieval=False,
+        document_pre_retrieval_top_n=5,
     )
     base.update(overrides)
     return Settings(**base)

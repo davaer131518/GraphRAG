@@ -483,6 +483,15 @@ class FakeNeo4j:
     ) -> list[dict[str, Any]]:
         return [_section_map_row()]
 
+    def get_top_documents(
+        self,
+        embedding: list[float],
+        *,
+        top_n: int,
+        corpus_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return [{"doc_id": "doc_001", "filename": "document.pdf", "score": 0.95}]
+
     # Infrastructure ----------------------------------------------------------
 
     def has_index(self, name: str) -> bool:

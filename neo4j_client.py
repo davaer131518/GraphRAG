@@ -103,6 +103,31 @@ class Neo4jClient:
             """
         )
 
+    def get_top_documents(
+        self,
+        embedding: list[float],
+        *,
+        top_n: int,
+        corpus_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Vector search over Document.embedding — returns top-N most relevant documents.
+
+        Returns an empty list if the document_embedding_index does not exist yet
+        (graceful degradation for graphs built before this feature was added).
+        """
+        if not self.has_index("document_embedding_index"):
+            return []
+        return self.run(
+            """
+            CALL db.index.vector.queryNodes('document_embedding_index', $top_n, $embedding)
+            YIELD node AS d, score
+            WHERE $corpus_id IS NULL OR d.corpus_id = $corpus_id
+            RETURN d.doc_id AS doc_id, d.filename AS filename, score
+            ORDER BY score DESC
+            """,
+            {"top_n": top_n, "embedding": embedding, "corpus_id": corpus_id},
+        )
+
     # ── Seed retrieval ────────────────────────────────────────────────────────
 
     def vector_search_blocks(
@@ -124,6 +149,7 @@ class Neo4jClient:
                    node.page_number AS page,
                    node.reading_order AS reading_order,
                    node.text AS text,
+                   node.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -161,6 +187,7 @@ class Neo4jClient:
                            node.page_number AS page,
                            node.reading_order AS reading_order,
                            node.text AS text,
+                           node.table_html AS table_html,
                            s.section_id AS section_id,
                            s.title AS section_title,
                            s.path AS section_path,
@@ -203,6 +230,7 @@ class Neo4jClient:
                    b.page_number AS page,
                    b.reading_order AS reading_order,
                    b.text AS text,
+                   b.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -248,6 +276,7 @@ class Neo4jClient:
                            node.page_number AS page,
                            node.reading_order AS reading_order,
                            node.text AS text,
+                           node.table_html AS table_html,
                            s.section_id AS section_id,
                            s.title AS section_title,
                            s.path AS section_path,
@@ -288,6 +317,7 @@ class Neo4jClient:
                    b.page_number AS page,
                    b.reading_order AS reading_order,
                    b.text AS text,
+                   b.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -313,6 +343,7 @@ class Neo4jClient:
                    b.page_number AS page,
                    b.reading_order AS reading_order,
                    b.text AS text,
+                   b.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -417,6 +448,7 @@ class Neo4jClient:
                    n.page_number AS page,
                    n.reading_order AS reading_order,
                    n.text AS text,
+                   n.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -506,6 +538,7 @@ class Neo4jClient:
                    n.page_number AS page,
                    n.reading_order AS reading_order,
                    n.text AS text,
+                   n.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -539,6 +572,7 @@ class Neo4jClient:
                    introduced.page_number AS page,
                    introduced.reading_order AS reading_order,
                    introduced.text AS text,
+                   introduced.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -588,6 +622,7 @@ class Neo4jClient:
                    hit.block.page_number AS page,
                    hit.block.reading_order AS reading_order,
                    hit.block.text AS text,
+                   hit.block.table_html AS table_html,
                    hit.section.section_id AS section_id,
                    hit.section.title AS section_title,
                    hit.section.path AS section_path,
@@ -634,6 +669,7 @@ class Neo4jClient:
                    sibling.page_number AS page,
                    sibling.reading_order AS reading_order,
                    sibling.text AS text,
+                   sibling.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -682,6 +718,7 @@ class Neo4jClient:
                    b.page_number AS page,
                    b.reading_order AS reading_order,
                    b.text AS text,
+                   b.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -736,6 +773,7 @@ class Neo4jClient:
                    b.page_number AS page,
                    b.reading_order AS reading_order,
                    b.text AS text,
+                   b.table_html AS table_html,
                    s.section_id AS section_id,
                    s.title AS section_title,
                    s.path AS section_path,
@@ -831,6 +869,7 @@ class Neo4jClient:
                    hit.block.page_number AS page,
                    hit.block.reading_order AS reading_order,
                    hit.block.text AS text,
+                   hit.block.table_html AS table_html,
                    hit.section.section_id AS section_id,
                    hit.section.title AS section_title,
                    hit.section.path AS section_path,
@@ -885,6 +924,7 @@ class Neo4jClient:
                    hit.block.page_number AS page,
                    hit.block.reading_order AS reading_order,
                    hit.block.text AS text,
+                   hit.block.table_html AS table_html,
                    s2.section_id AS section_id,
                    s2.title AS section_title,
                    s2.path AS section_path,
@@ -933,6 +973,7 @@ class Neo4jClient:
                    target.page_number AS page,
                    target.page_number AS target_page,
                    target.text AS text,
+                   target.table_html AS table_html,
                    target.text AS target_text,
                    ts.section_id AS section_id,
                    ts.title AS section_title,

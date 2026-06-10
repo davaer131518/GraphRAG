@@ -61,6 +61,7 @@ class EvidenceItem:
     relationship_confidence: float | None = None
     relationship_scope: str | None = None
     relationship_methods: list[str] = field(default_factory=list)
+    table_html: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -104,6 +105,7 @@ class EvidenceItem:
             relationship_confidence=row.get("confidence"),
             relationship_scope=row.get("scope"),
             relationship_methods=list(row.get("methods") or []),
+            table_html=row.get("table_html"),
             metadata=metadata or {},
         )
 
@@ -146,6 +148,7 @@ class SourceCitation:
     doc_id: str | None = None
     doc_label: str | None = None
     mentioned_entities: list[dict[str, Any]] = field(default_factory=list)
+    table_html: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

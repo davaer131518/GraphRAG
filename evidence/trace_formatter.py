@@ -1,7 +1,51 @@
 from __future__ import annotations
 
 import json
+from html.parser import HTMLParser
 from typing import Any
+
+
+class _TableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[str]] = []
+        self._row: list[str] = []
+        self._cell: list[str] = []
+        self._in_cell = False
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th"):
+            self._cell = []
+            self._in_cell = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th"):
+            self._row.append(" ".join(self._cell).strip())
+            self._in_cell = False
+        elif tag == "tr" and self._row:
+            self.rows.append(self._row)
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._cell.append(data.strip())
+
+
+def _html_table_to_markdown(html: str) -> str:
+    p = _TableParser()
+    p.feed(html)
+    if not p.rows:
+        return ""
+    max_cols = max(len(r) for r in p.rows)
+    rows = [r + [""] * (max_cols - len(r)) for r in p.rows]
+
+    def row_md(cells: list[str]) -> str:
+        return "| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |"
+
+    lines = [row_md(rows[0]), "| " + " | ".join(["---"] * max_cols) + " |"]
+    lines += [row_md(r) for r in rows[1:]]
+    return "\n".join(lines)
 
 from evidence.evidence_bundle import (
     AnalystAnswer,
@@ -66,6 +110,7 @@ def format_sources_markdown(
         section_path = source.get("section_path") or ""
         why = source.get("why_relevant") or "Selected by the retrieval pipeline."
         snippet = source.get("snippet") or ""
+        table_html = source.get("table_html") or ""
         mentioned_entities = source.get("mentioned_entities") or []
         doc_label = source.get("doc_label") or source.get("doc_id")
 
@@ -86,12 +131,12 @@ def format_sources_markdown(
                 for e in top
             )
             lines.append(f"Mentions: {entity_str}")
-        lines += [
-            "",
-            f"Why relevant: {why}",
-            "",
-            f'Snippet: "{snippet}"',
-        ]
+        lines += ["", f"Why relevant: {why}", ""]
+        if btype == "table" and table_html:
+            md_table = _html_table_to_markdown(table_html)
+            lines.append(md_table if md_table else f'Snippet: "{snippet}"')
+        else:
+            lines.append(f'Snippet: "{snippet}"')
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 

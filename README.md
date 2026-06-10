@@ -10,7 +10,13 @@ The user interface is built with Chainlit. All retrieval, graph expansion, evide
 
 The system does not do plain text search over a document. It reads from a pre-built Neo4j knowledge graph where every block of text from a parsed PDF is a node (`Block`) connected to other blocks through typed relationships that encode reading order, section structure, caption connections, semantic similarity, and LLM-labelled table relationships.
 
-When you ask a question the pipeline runs in three layers:
+When you ask a question the pipeline runs in three layers, optionally preceded by a document pre-retrieval step:
+
+### Pre-step — Document pre-retrieval (optional)
+
+When the scope is still whole-corpus and `ENABLE_DOCUMENT_PRE_RETRIEVAL=true`, the question is embedded with bge-m3 and compared against per-document centroid embeddings stored in `Document.embedding`. The top-N most relevant documents (default `DOCUMENT_PRE_RETRIEVAL_TOP_N=5`) are selected, and all subsequent block retrieval is restricted to those documents. This prevents cross-corpus dilution in large corpora — financial questions from one set of filings won't be drowned out by topically similar but wrong documents.
+
+If the `document_embedding_index` is absent (graphs built before KnowledgeGraphBuilder added centroid storage), this step is silently skipped and the pipeline proceeds exactly as if the flag were off.
 
 ### Layer 1 — Seed retrieval
 
@@ -60,7 +66,8 @@ When the final evidence spans more than one document, the LLM is given a **compa
 ```
 Question
   -> embed question          (bge-m3 on EMBED_SERVER_URL)
-  -> vector search           (Neo4j block_embedding_index)
+  -> document pre-retrieval  (Neo4j document_embedding_index; narrows scope if whole-corpus)
+  -> vector search           (Neo4j block_embedding_index, within narrowed scope)
   -> keyword search          (Neo4j full-text or CONTAINS)
   -> entity search           (Neo4j :Entity via MENTIONS, 3-tier matching)
   -> table keyword search    (Neo4j full-text or CONTAINS, type='table' only)
@@ -156,6 +163,9 @@ $env:ENABLE_ENTITY_RETRIEVER         = "true"
 $env:ENABLE_ENTITY_EXPANSION         = "true"
 $env:ENABLE_SECTION_EXPANSION        = "true"
 $env:ENABLE_GLOBAL_SIMILARITY_EXPANSION = "true"
+# Document pre-retrieval (narrows corpus to top-N most relevant docs before block search)
+$env:ENABLE_DOCUMENT_PRE_RETRIEVAL  = "true"
+$env:DOCUMENT_PRE_RETRIEVAL_TOP_N   = "5"
 ```
 
 `DOCUMENT_ID` scopes all queries to a single document node. Leave it unset to query across all documents in the graph.
@@ -329,6 +339,10 @@ All tests use mocked Neo4j and LLM clients so they run without any running servi
 
 **Table retrieval uses two complementary mechanisms.** The table keyword search seeds table blocks directly from question terms (bypassing prose competition). The `table_in_section_bonus` promotes table blocks that land in the same section as any prose seed (catching intro-paragraph → table pairs). Together these ensure financial and structured data tables surface reliably for numeric/data questions.
 
+**Table blocks follow two separate rendering paths.** The LLM and the Chainlit UI receive different representations of the same `Block.table_html` property:
+- **LLM prompt** (`_html_table_to_llm_text` in `generation/prompts.py`): HTML is converted to a labeled-row text format (`Table columns: 2023 | 2022 | 2021` / `iPhone: 200583 | ...`). Thousands-separator commas are stripped from values (so `200,583` becomes `200583` — unambiguous for a model that might read commas as decimal points) and footnote markers are stripped from row labels. Table blocks are never merged into prose list groups regardless of their text length.
+- **Source cards in Chainlit** (`_html_table_to_markdown` in `evidence/trace_formatter.py`): HTML is converted to a Markdown pipe table, which Chainlit renders visually. Numbers keep their commas for human readability. Falls back to the pipe-delimited `Block.text` snippet when `table_html` is absent.
+
 ---
 
 ## Graph schema (built by KnowledgeGraphBuilder)
@@ -336,9 +350,11 @@ All tests use mocked Neo4j and LLM clients so they run without any running servi
 ### Per-document nodes and edges
 
 ```
-(:Document {doc_id, filename, num_pages, corpus_id, logical_doc_key, doc_family, version_id, published_at, language, source_uri, ingested_at})
+(:Document {doc_id, filename, num_pages, corpus_id, logical_doc_key, doc_family, version_id, published_at, embedding, language, source_uri, ingested_at})
+                                                     ↑ L2-normalised centroid of all block embeddings; indexed by document_embedding_index
 (:Page {page_id, page_number})
-(:Block {block_id, type, text, page_number, reading_order, embedding})
+(:Block {block_id, type, text, page_number, reading_order, embedding, table_html})
+                                table_html is only present when type='table'; used for accurate LLM table reading and Chainlit rendering
 (:Section {section_id, title, path, level, page_start, page_end, block_count, heading_block_id, doc_id})
 (:Entity {entity_id, canonical_name, normalized_name, aliases, type, confidence, doc_frequency_ratio, doc_id})
 
@@ -392,6 +408,7 @@ All cross-doc edges are **canonically ordered** (`min(id) → max(id)`) — alwa
 - `TABLE_RELATES_TO` appears when APOC is absent; use `coalesce(r.label, type(r))` to normalise.
 - `:Entity` nodes with `type='TERM'` and high `doc_frequency_ratio` are filtered by `TERM_DOC_FREQ_FILTER`.
 - Vector index: `block_embedding_index` (1024-dim cosine on `Block.embedding`).
+- Vector index: `document_embedding_index` (1024-dim cosine on `Document.embedding`). Present on graphs built by a recent KnowledgeGraphBuilder; absent on older graphs — the pipeline degrades gracefully when it is missing.
 - Optional full-text index: `block_text_fulltext` (created lazily when `CREATE_FULLTEXT_INDEX=true`).
 
 ---
@@ -402,6 +419,7 @@ The analyst supports multi-document corpora natively. Scope is determined automa
 
 1. **Sticky session scope** (highest priority): set by `/use <doc_id>` or `/scope <ids>`, seeded from `DOCUMENT_ID` env var at startup.
 2. **Query-driven scope**: a deterministic resolver maps explicit document/version references in the question (filename, `logical_doc_key`, year, family) to `doc_id`s. Ambiguous references fall back to the whole corpus rather than guessing.
-3. **Whole-corpus default**: when no reference is found, retrieval covers all documents in the corpus and relevance ranking surfaces the answer.
+3. **Document pre-retrieval** (`ENABLE_DOCUMENT_PRE_RETRIEVAL=true`): when scope is still unresolved after step 2, the question embedding is compared against per-document centroid embeddings (`Document.embedding`) to select the top-N most relevant documents. Block retrieval then operates within that narrowed scope, preventing dilution in large corpora. Requires the `document_embedding_index` in Neo4j; degrades gracefully (no-op) on older graphs that don't have it.
+4. **Whole-corpus default**: when no reference is found and pre-retrieval is off or unavailable, retrieval covers all documents in the corpus and relevance ranking surfaces the answer.
 
 Cross-doc retrieval arms (Arms 4/5/6) activate automatically when more than one document is in scope and are inert at corpus size 1.
