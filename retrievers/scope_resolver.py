@@ -159,6 +159,20 @@ def determine_scope(question: str, documents: list[dict[str, Any]]) -> _Determin
     if n == 1:
         doc = next(d for d in documents if d["doc_id"] == all_matched_ids[0])
         fname = doc.get("filename") or all_matched_ids[0]
+        # Comparison cue with only one matching document means the other referenced
+        # timeframe/entity likely lives in a different document that wasn't matched
+        # (e.g. "FY2022 vs FY2025" — only the 2025 filing matches by publication year,
+        # but FY2022 data is in the 2023 filing). Fall back to whole corpus so the
+        # answer isn't silently truncated to one filing.
+        if has_cue:
+            return _Determination(
+                result=_DeterministicResult.AMBIGUOUS,
+                matched_doc_ids=all_matched_ids,
+                rationale=(
+                    f"Whole corpus (comparison intent detected but only 1 document matched "
+                    f"'{fname}'; other timeframe may reside in a different document)."
+                ),
+            )
         return _Determination(
             result=_DeterministicResult.CONFIDENT_SINGLE,
             matched_doc_ids=all_matched_ids,

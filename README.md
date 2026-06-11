@@ -291,7 +291,7 @@ GraphRAG/
 │   └── answer_generator.py     JSON answer parsing, validation, and fallback handling
 ├── retrievers/
 │   ├── scope.py                RetrievalScope frozen dataclass — per-turn document scoping
-│   ├── scope_resolver.py       Deterministic scope resolver (filename, doc key, year, family cues)
+│   ├── scope_resolver.py       Deterministic scope resolver (filename, doc key, year, family cues); comparison-intent cues fall back to whole-corpus when only one document matches
 │   ├── semantic_retriever.py   Vector search seeds
 │   ├── keyword_retriever.py    Keyword/full-text search seeds + table keyword search + term extraction
 │   ├── entity_retriever.py     Entity-based seeds via :Entity MENTIONS edges (3-tier matching)
@@ -418,7 +418,7 @@ All cross-doc edges are **canonically ordered** (`min(id) → max(id)`) — alwa
 The analyst supports multi-document corpora natively. Scope is determined automatically on each turn:
 
 1. **Sticky session scope** (highest priority): set by `/use <doc_id>` or `/scope <ids>`, seeded from `DOCUMENT_ID` env var at startup.
-2. **Query-driven scope**: a deterministic resolver maps explicit document/version references in the question (filename, `logical_doc_key`, year, family) to `doc_id`s. Ambiguous references fall back to the whole corpus rather than guessing.
+2. **Query-driven scope**: a deterministic resolver (`retrievers/scope_resolver.py`) maps explicit document/version references in the question (filename, `logical_doc_key`, `published_at` year, family) to `doc_id`s via `_matches_doc()`. Three outcomes: `CONFIDENT_SINGLE` (exactly one doc matched, no comparison cue) → scoped to that doc; `CONFIDENT_SET` (≥2 docs matched with comparison cue) → scoped to that set; `AMBIGUOUS` → whole corpus. **Comparison-intent cues** (`vs`, `versus`, `compare`, `difference between`, `across years/filings`) trigger a special case: if only one document matches by metadata but the question implies a cross-document comparison (e.g. "FY2022 vs FY2025" where FY2022 data lives in a different filing), the resolver returns `AMBIGUOUS` rather than `CONFIDENT_SINGLE`, preventing the other timeframe from being silently excluded. Ambiguous references fall back to the whole corpus rather than guessing.
 3. **Document pre-retrieval** (`ENABLE_DOCUMENT_PRE_RETRIEVAL=true`): when scope is still unresolved after step 2, the question embedding is compared against per-document centroid embeddings (`Document.embedding`) to select the top-N most relevant documents. Block retrieval then operates within that narrowed scope, preventing dilution in large corpora. Requires the `document_embedding_index` in Neo4j; degrades gracefully (no-op) on older graphs that don't have it.
 4. **Whole-corpus default**: when no reference is found and pre-retrieval is off or unavailable, retrieval covers all documents in the corpus and relevance ranking surfaces the answer.
 
